@@ -17,4 +17,13 @@ final class GestureDecisionTests: XCTestCase {
             )
         )
     }
+
+    func testDragRemainsLatchedAfterPointerReturnsNearStart() {
+        var gesture = PointerGestureTracker(start: .zero)
+
+        gesture.observe(.init(x: 6, y: 0))
+        gesture.observe(.init(x: 1, y: 0))
+
+        XCTAssertFalse(gesture.isClick(endingAt: .init(x: 1, y: 0)))
+    }
 }

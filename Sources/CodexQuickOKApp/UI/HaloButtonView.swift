@@ -1,6 +1,11 @@
 import AppKit
 import CodexQuickOKCore
 
+enum HaloFeedbackState: Equatable {
+    case success
+    case failure
+}
+
 @MainActor
 final class HaloButtonView: NSView {
     var onActivate: (() -> Void)?
@@ -8,33 +13,34 @@ final class HaloButtonView: NSView {
     var onDragEnded: (() -> Void)?
     var isActivationEnabled = true
 
-    private var startScreen: NSPoint?
+    private var gestureTracker: PointerGestureTracker?
     private var grabOffset: NSPoint?
     private(set) var remainingPercent: Double?
+    private(set) var feedbackState: HaloFeedbackState?
+    private(set) var quotaToolTip = "周额度暂不可用"
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: 64, height: 64)
     }
 
     override func mouseDown(with event: NSEvent) {
-        startScreen = NSEvent.mouseLocation
+        gestureTracker = PointerGestureTracker(start: NSEvent.mouseLocation)
         grabOffset = event.locationInWindow
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let grabOffset else { return }
+        guard let grabOffset, var gestureTracker else { return }
         let mouse = NSEvent.mouseLocation
+        gestureTracker.observe(mouse)
+        self.gestureTracker = gestureTracker
         onMoveOrigin?(
             NSPoint(x: mouse.x - grabOffset.x, y: mouse.y - grabOffset.y)
         )
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard let startScreen else { return }
-        let isClick = GestureDecision.isClick(
-            start: startScreen,
-            end: NSEvent.mouseLocation
-        )
+        guard let gestureTracker else { return }
+        let isClick = gestureTracker.isClick(endingAt: NSEvent.mouseLocation)
 
         if isClick {
             if isActivationEnabled {
@@ -44,15 +50,38 @@ final class HaloButtonView: NSView {
             onDragEnded?()
         }
 
-        self.startScreen = nil
+        self.gestureTracker = nil
         grabOffset = nil
     }
 
     func setQuota(_ quota: WeeklyQuota?) {
         remainingPercent = quota?.remainingPercent
-        toolTip = quota.map {
+        quotaToolTip = quota.map {
             "周额度剩余 \(Int($0.remainingPercent.rounded()))%，重置于 \($0.resetsAt.formatted())"
         } ?? "周额度暂不可用"
+        if feedbackState != .failure {
+            toolTip = quotaToolTip
+        }
+        needsDisplay = true
+    }
+
+    func showSuccessFeedback() {
+        feedbackState = .success
+        setAccessibilityValue("批准成功")
+        needsDisplay = true
+    }
+
+    func showFailureFeedback(_ message: String) {
+        feedbackState = .failure
+        toolTip = message
+        setAccessibilityValue(message)
+    }
+
+    func endFeedback() {
+        guard feedbackState != nil else { return }
+        feedbackState = nil
+        toolTip = quotaToolTip
+        setAccessibilityValue(quotaToolTip)
         needsDisplay = true
     }
 
@@ -81,7 +110,10 @@ final class HaloButtonView: NSView {
             endAngle: 90 - 360 * CGFloat((percent ?? 100) / 100),
             clockwise: true
         )
-        CodexQuickOKColor.quota(for: percent).setStroke()
+        let haloColor = feedbackState == .success
+            ? CodexQuickOKColor.mint
+            : CodexQuickOKColor.quota(for: percent)
+        haloColor.setStroke()
         ring.stroke()
 
         let text = NSAttributedString(

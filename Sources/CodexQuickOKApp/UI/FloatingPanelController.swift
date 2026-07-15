@@ -3,6 +3,57 @@ import CodexQuickOKCore
 import QuartzCore
 
 @MainActor
+protocol FeedbackScheduling: AnyObject {
+    func schedule(
+        after delay: TimeInterval,
+        completion: @escaping @MainActor () -> Void
+    )
+    func cancel()
+}
+
+@MainActor
+final class TaskFeedbackScheduler: FeedbackScheduling {
+    private var task: Task<Void, Never>?
+
+    func schedule(
+        after delay: TimeInterval,
+        completion: @escaping @MainActor () -> Void
+    ) {
+        cancel()
+        task = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            self?.task = nil
+            completion()
+        }
+    }
+
+    func cancel() {
+        task?.cancel()
+        task = nil
+    }
+}
+
+@MainActor
+protocol AccessibilityAnnouncing: AnyObject {
+    func announce(_ message: String, for element: Any)
+}
+
+@MainActor
+final class SystemAccessibilityAnnouncer: AccessibilityAnnouncing {
+    func announce(_ message: String, for element: Any) {
+        NSAccessibility.post(
+            element: element,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: message,
+                .priority: NSAccessibilityPriorityLevel.high.rawValue,
+            ]
+        )
+    }
+}
+
+@MainActor
 protocol CompanionPanel: AnyObject {
     var onActivate: (() -> Void)? { get set }
     var onTemporaryHide: (() -> Void)? { get set }
@@ -27,6 +78,8 @@ final class FloatingPanelController: NSObject, CompanionPanel {
     private let panel: NSPanel
     private let positionStore: PanelPositionStore
     private let reduceMotion: () -> Bool
+    private let feedbackScheduler: any FeedbackScheduling
+    private let accessibilityAnnouncer: any AccessibilityAnnouncing
     let button = HaloButtonView(
         frame: NSRect(x: 0, y: 0, width: 64, height: 64)
     )
@@ -38,7 +91,6 @@ final class FloatingPanelController: NSObject, CompanionPanel {
     private var mode: CompanionMode = .hidden
     private var isSending = false
     private var isShowingFeedback = false
-    private var feedbackTask: Task<Void, Never>?
 
     var onActivate: (() -> Void)? {
         didSet { button.onActivate = onActivate }
@@ -50,10 +102,14 @@ final class FloatingPanelController: NSObject, CompanionPanel {
         positionStore: PanelPositionStore = PanelPositionStore(),
         reduceMotion: @escaping () -> Bool = {
             NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        }
+        },
+        feedbackScheduler: any FeedbackScheduling = TaskFeedbackScheduler(),
+        accessibilityAnnouncer: any AccessibilityAnnouncing = SystemAccessibilityAnnouncer()
     ) {
         self.positionStore = positionStore
         self.reduceMotion = reduceMotion
+        self.feedbackScheduler = feedbackScheduler
+        self.accessibilityAnnouncer = accessibilityAnnouncer
         panel = NSPanel(
             contentRect: button.bounds,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -154,36 +210,34 @@ final class FloatingPanelController: NSObject, CompanionPanel {
     }
 
     func showSuccess() {
-        guard motionIsAllowed else {
-            cancelFeedback()
-            removeMotionAnimations()
-            return
-        }
+        button.showSuccessFeedback()
+        accessibilityAnnouncer.announce("批准成功", for: button)
         let animation = CAKeyframeAnimation(keyPath: "transform.scale")
         animation.values = [1, 1.08, 1]
         animation.duration = 0.28
         showFeedback(
-            animation,
+            motionIsAllowed ? animation : nil,
             key: AnimationKey.success,
-            duration: animation.duration
+            duration: animation.duration,
+            completion: { [weak button] in
+                button?.endFeedback()
+            }
         )
     }
 
     func showFailure(_ message: String) {
         NSSound.beep()
-        button.toolTip = message
-        guard motionIsAllowed else {
-            cancelFeedback()
-            removeMotionAnimations()
-            return
-        }
+        button.showFailureFeedback(message)
         let animation = CAKeyframeAnimation(keyPath: "opacity")
         animation.values = [1, 0.45, 1, 0.45, 1]
         animation.duration = 0.55
         showFeedback(
-            animation,
+            motionIsAllowed ? animation : nil,
             key: AnimationKey.failure,
-            duration: animation.duration
+            duration: animation.duration,
+            completion: { [weak button] in
+                button?.endFeedback()
+            }
         )
     }
 
@@ -227,27 +281,29 @@ final class FloatingPanelController: NSObject, CompanionPanel {
     }
 
     private func showFeedback(
-        _ animation: CAAnimation,
+        _ animation: CAAnimation?,
         key: String,
-        duration: TimeInterval
+        duration: TimeInterval,
+        completion: @escaping @MainActor () -> Void = {}
     ) {
-        feedbackTask?.cancel()
+        feedbackScheduler.cancel()
         removeMotionAnimations()
         isShowingFeedback = true
-        button.layer?.add(animation, forKey: key)
-        feedbackTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(duration))
-            guard !Task.isCancelled, let self else { return }
+        if let animation {
+            button.layer?.add(animation, forKey: key)
+        }
+        feedbackScheduler.schedule(after: duration) { [weak self] in
+            guard let self else { return }
             isShowingFeedback = false
-            feedbackTask = nil
+            completion()
             updateContinuousAnimation()
         }
     }
 
     private func cancelFeedback() {
-        feedbackTask?.cancel()
-        feedbackTask = nil
+        feedbackScheduler.cancel()
         isShowingFeedback = false
+        button.endFeedback()
     }
 
     private func removeMotionAnimations() {
@@ -258,9 +314,12 @@ final class FloatingPanelController: NSObject, CompanionPanel {
     }
 
     private func persistPosition() {
-        let screen = NSScreen.screens.first(where: {
-            $0.frame.intersects(panel.frame)
-        }) ?? NSScreen.main
+        let screens = NSScreen.screens
+        let preferredIndex = ScreenRectangleSelector.preferredIndex(
+            for: panel.frame,
+            among: screens.map(\.frame)
+        )
+        let screen = preferredIndex.map { screens[$0] } ?? NSScreen.main
         guard let screen else { return }
 
         let visible = screen.visibleFrame
