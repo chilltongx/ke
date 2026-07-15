@@ -20,7 +20,19 @@ protocol ApprovalSending: AnyObject {
 }
 
 struct ApprovalSendReceipt: Equatable, Sendable {
-    let sentAt: Date
+    let notBefore: Date
+    let completedAt: Date
+}
+
+enum ApprovalSendError: Error, Equatable, LocalizedError {
+    case inProgress
+
+    var errorDescription: String? {
+        switch self {
+        case .inProgress:
+            "上一次发送仍在进行，请稍后重试"
+        }
+    }
 }
 
 extension ApprovalSending {
@@ -51,7 +63,7 @@ final class ApprovalSender: ApprovalSending {
         onReceipt: @escaping @MainActor (ApprovalSendReceipt) -> Void
     ) async throws {
         guard !sending else {
-            return
+            throw ApprovalSendError.inProgress
         }
         sending = true
         defer { sending = false }
@@ -70,7 +82,11 @@ final class ApprovalSender: ApprovalSending {
         )
 
         try automation.setComposerValue("可")
+        let notBefore = now()
         try automation.performSend()
-        onReceipt(ApprovalSendReceipt(sentAt: now()))
+        let completedAt = now()
+        onReceipt(
+            ApprovalSendReceipt(notBefore: notBefore, completedAt: completedAt)
+        )
     }
 }

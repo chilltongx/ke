@@ -14,6 +14,7 @@ final class FakeCodexAutomation: CodexAutomating {
     var matched: Bool
     var value: String
     var activationDelay: Duration?
+    var activationGate: (() async throws -> Void)?
     var activationError: Error?
     var composerError: Error?
     var sendError: Error?
@@ -30,6 +31,7 @@ final class FakeCodexAutomation: CodexAutomating {
 
     func activateAndOpen(sessionId: String) async throws {
         activatedSessionIds.append(sessionId)
+        try await activationGate?()
         if let activationDelay {
             try await Task.sleep(for: activationDelay)
         }

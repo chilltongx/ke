@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public actor SessionStateStore {
@@ -39,37 +40,83 @@ public actor SessionStateStore {
 
     public func save(_ state: SessionState) throws {
         let url = try sessionFileURL(for: state.sessionId)
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        try encoder.encode(state).write(to: url, options: [.atomic])
+        try withExclusiveLock {
+            try encoder.encode(state).write(to: url, options: [.atomic])
+        }
     }
 
     public func loadAll(now: Date, staleAfter: TimeInterval) throws -> [SessionState] {
         guard fileManager.fileExists(atPath: directory.path) else { return [] }
-        var result: [SessionState] = []
-        for url in try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            where url.pathExtension == "json" {
-            guard let data = try? Data(contentsOf: url),
-                  let state = try? decoder.decode(SessionState.self, from: data) else { continue }
-            if now.timeIntervalSince(state.updatedAt) > staleAfter {
-                try? fileManager.removeItem(at: url)
-            } else {
-                result.append(state)
+        return try withExclusiveLock {
+            var result: [SessionState] = []
+            for url in try sessionFileURLs() {
+                guard let data = try? Data(contentsOf: url),
+                      let state = try? decoder.decode(SessionState.self, from: data) else {
+                    continue
+                }
+                if now.timeIntervalSince(state.updatedAt) > staleAfter {
+                    try? fileManager.removeItem(at: url)
+                } else {
+                    result.append(state)
+                }
             }
+            return result
         }
-        return result
     }
 
     public func remove(sessionId: String) throws {
         let url = try sessionFileURL(for: sessionId)
-        if fileManager.fileExists(atPath: url.path) { try fileManager.removeItem(at: url) }
+        try withExclusiveLock {
+            if fileManager.fileExists(atPath: url.path) {
+                try fileManager.removeItem(at: url)
+            }
+        }
     }
 
     public func removeAll() throws {
         guard fileManager.fileExists(atPath: directory.path) else { return }
-        for url in try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            where url.pathExtension == "json" {
-            try fileManager.removeItem(at: url)
+        try withExclusiveLock {
+            for url in try sessionFileURLs() {
+                try fileManager.removeItem(at: url)
+            }
         }
+    }
+
+    public func removeAll(updatedAtOrBefore cutoff: Date) throws {
+        guard fileManager.fileExists(atPath: directory.path) else { return }
+        try withExclusiveLock {
+            for url in try sessionFileURLs() {
+                guard let data = try? Data(contentsOf: url),
+                      let state = try? decoder.decode(SessionState.self, from: data),
+                      state.updatedAt <= cutoff else {
+                    continue
+                }
+                try fileManager.removeItem(at: url)
+            }
+        }
+    }
+
+    private func withExclusiveLock<T>(_ operation: () throws -> T) throws -> T {
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let lockURL = directory.appendingPathComponent(".store.lock")
+        let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { throw posixError() }
+        defer { close(descriptor) }
+
+        guard flock(descriptor, LOCK_EX) == 0 else { throw posixError() }
+        defer { flock(descriptor, LOCK_UN) }
+        return try operation()
+    }
+
+    private func sessionFileURLs() throws -> [URL] {
+        try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "json" }
+    }
+
+    private func posixError() -> POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 
     private func sessionFileURL(for sessionId: String) throws -> URL {

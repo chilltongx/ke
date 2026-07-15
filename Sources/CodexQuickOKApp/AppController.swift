@@ -3,7 +3,7 @@ import Foundation
 
 protocol SessionStateStoring: Sendable {
     func loadAll(now: Date, staleAfter: TimeInterval) async throws -> [SessionState]
-    func removeAll() async throws
+    func removeAll(updatedAtOrBefore cutoff: Date) async throws
 }
 
 extension SessionStateStore: SessionStateStoring {}
@@ -29,9 +29,12 @@ final class AppController {
     private let panel: any CompanionPanel
     private let sender: any ApprovalSending
     private let confirmationTimeout: TimeInterval
+    private let now: () -> Date
     private var codexRunning = false
     private var stateGeneration: UInt64 = 0
     private var processLoadTask: Task<Void, Never>?
+    private var cleanupTask: Task<Void, Never>?
+    private var cleanupGeneration: UInt64 = 0
     private var attemptGeneration: UInt64 = 0
     private var activeAttempt: ActiveAttempt?
     private var pendingConfirmation: PendingConfirmation?
@@ -45,12 +48,14 @@ final class AppController {
         store: any SessionStateStoring,
         panel: any CompanionPanel,
         sender: any ApprovalSending,
-        confirmationTimeout: TimeInterval = 2
+        confirmationTimeout: TimeInterval = 2,
+        now: @escaping () -> Date = Date.init
     ) {
         self.store = store
         self.panel = panel
         self.sender = sender
         self.confirmationTimeout = confirmationTimeout
+        self.now = now
 
         panel.onActivate = { [weak self] in
             self?.beginActivation()
@@ -78,13 +83,26 @@ final class AppController {
         codexRunning = running
 
         guard running else {
+            let cutoff = now()
+            let previousCleanupTask = cleanupTask
+            cleanupGeneration &+= 1
+            let cleanupId = cleanupGeneration
+            cleanupTask = Task { @MainActor [weak self, store] in
+                await previousCleanupTask?.value
+                try? await store.removeAll(updatedAtOrBefore: cutoff)
+                guard let self, cleanupGeneration == cleanupId else { return }
+                cleanupTask = nil
+            }
             applySnapshot(states: [], codexRunning: false)
             return
         }
 
+        let pendingCleanupTask = cleanupTask
         processLoadTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let states = (try? await store.loadAll(now: Date(), staleAfter: 43_200)) ?? []
+            await pendingCleanupTask?.value
+            guard generation == stateGeneration, codexRunning else { return }
+            let states = (try? await store.loadAll(now: now(), staleAfter: 43_200)) ?? []
             guard generation == stateGeneration, codexRunning else { return }
             processLoadTask = nil
             applySnapshot(states: states, codexRunning: true)
@@ -96,7 +114,10 @@ final class AppController {
         let generation = stateGeneration
         guard codexRunning else { return }
 
-        let states = (try? await store.loadAll(now: Date(), staleAfter: 43_200)) ?? []
+        let pendingCleanupTask = cleanupTask
+        await pendingCleanupTask?.value
+        guard generation == stateGeneration, codexRunning else { return }
+        let states = (try? await store.loadAll(now: now(), staleAfter: 43_200)) ?? []
         guard generation == stateGeneration, codexRunning else { return }
         applySnapshot(states: states, codexRunning: true)
     }
@@ -117,14 +138,7 @@ final class AppController {
     private func applySnapshot(states: [SessionState], codexRunning: Bool) {
         if !codexRunning {
             cancelActiveAttempt()
-        } else if let pendingConfirmation,
-                  Date() <= pendingConfirmation.deadline,
-                  states.contains(where: {
-                      $0.sessionId == pendingConfirmation.sessionId
-                          && $0.phase == .running
-                          && $0.updatedAt > pendingConfirmation.minimumUpdatedAt
-                  }) {
-            completeAttempt(attemptId: pendingConfirmation.attemptId)
+        } else if confirmPendingAttemptIfPossible(in: states) {
             panel.showSuccess()
         }
 
@@ -132,7 +146,7 @@ final class AppController {
         let snapshot = SessionSnapshotEvaluator.evaluate(
             states: states,
             codexRunning: codexRunning,
-            now: Date()
+            now: now()
         )
         currentSnapshot = snapshot
         targetSessionId = snapshot.targetSessionId
@@ -190,7 +204,9 @@ final class AppController {
         } catch is CancellationError {
             return
         } catch {
-            failAttempt(attemptId: attemptId, message: String(describing: error))
+            let message = (error as? LocalizedError)?.errorDescription
+                ?? String(describing: error)
+            failAttempt(attemptId: attemptId, message: message)
         }
     }
 
@@ -204,15 +220,15 @@ final class AppController {
               attempt.sessionId == sessionId,
               pendingConfirmation?.attemptId != attemptId else { return }
 
-        let deadline = receipt.sentAt.addingTimeInterval(confirmationTimeout)
+        let deadline = receipt.completedAt.addingTimeInterval(confirmationTimeout)
         pendingConfirmation = PendingConfirmation(
             attemptId: attemptId,
             sessionId: sessionId,
-            minimumUpdatedAt: max(attempt.baselineUpdatedAt, receipt.sentAt),
+            minimumUpdatedAt: max(attempt.baselineUpdatedAt, receipt.notBefore),
             deadline: deadline
         )
         attempt.timeoutTask = Task { @MainActor [weak self] in
-            let delay = max(0, deadline.timeIntervalSinceNow)
+            let delay = max(0, deadline.timeIntervalSince(self?.now() ?? Date()))
             do {
                 try await Task.sleep(for: .seconds(delay))
             } catch {
@@ -222,6 +238,23 @@ final class AppController {
             self?.confirmationTimedOut(attemptId: attemptId)
         }
         activeAttempt = attempt
+        if confirmPendingAttemptIfPossible(in: currentStates) {
+            panel.showSuccess()
+        }
+    }
+
+    private func confirmPendingAttemptIfPossible(in states: [SessionState]) -> Bool {
+        guard let pendingConfirmation,
+              now() <= pendingConfirmation.deadline,
+              states.contains(where: {
+                  $0.sessionId == pendingConfirmation.sessionId
+                      && $0.phase == .running
+                      && $0.updatedAt > pendingConfirmation.minimumUpdatedAt
+              }) else {
+            return false
+        }
+        completeAttempt(attemptId: pendingConfirmation.attemptId)
+        return true
     }
 
     private func confirmationTimedOut(attemptId: UInt64) {

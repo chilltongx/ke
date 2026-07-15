@@ -24,11 +24,13 @@ final class ApprovalSenderTests: XCTestCase {
             matched: true,
             value: ""
         )
-        let sentAt = Date(timeIntervalSince1970: 123.456)
+        let notBefore = Date(timeIntervalSince1970: 123.456)
+        let completedAt = Date(timeIntervalSince1970: 123.789)
+        var clockValues = [notBefore, completedAt]
         var events: [String] = []
         var receipt: ApprovalSendReceipt?
         automation.onPerformSend = { events.append("performSend") }
-        let sender = ApprovalSender(automation: automation, now: { sentAt })
+        let sender = ApprovalSender(automation: automation, now: { clockValues.removeFirst() })
 
         try await sender.sendOK(sessionId: "s1") { value in
             events.append("receipt")
@@ -36,7 +38,10 @@ final class ApprovalSenderTests: XCTestCase {
         }
 
         XCTAssertEqual(events, ["performSend", "receipt"])
-        XCTAssertEqual(receipt, ApprovalSendReceipt(sentAt: sentAt))
+        XCTAssertEqual(
+            receipt,
+            ApprovalSendReceipt(notBefore: notBefore, completedAt: completedAt)
+        )
     }
 
     func testRejectsWrongApplicationWithoutWriting() async {
@@ -90,18 +95,28 @@ final class ApprovalSenderTests: XCTestCase {
         XCTAssertEqual(automation.sendCount, 0)
     }
 
-    func testDuplicateInFlightSendWritesAndPressesOnlyOnce() async throws {
+    func testDuplicateInFlightSendThrowsExplicitErrorAndPressesOnlyOnce() async throws {
         let automation = FakeCodexAutomation(
             bundleId: "com.openai.codex",
             matched: true,
             value: ""
         )
-        automation.activationDelay = .milliseconds(100)
+        let gate = SenderActivationGate()
+        automation.activationGate = { await gate.wait() }
         let sender = ApprovalSender(automation: automation)
 
-        async let first: Void = sender.sendOK(sessionId: "s1")
-        async let second: Void = sender.sendOK(sessionId: "s1")
-        _ = try await (first, second)
+        let first = Task { try await sender.sendOK(sessionId: "s1") }
+        await waitUntilForSender { automation.activatedSessionIds == ["s1"] }
+
+        do {
+            try await sender.sendOK(sessionId: "s1")
+            XCTFail("Expected duplicate send rejection")
+        } catch {
+            XCTAssertEqual(error as? ApprovalSendError, .inProgress)
+        }
+
+        gate.release()
+        try await first.value
 
         XCTAssertEqual(automation.writtenValues, ["可"])
         XCTAssertEqual(automation.sendCount, 1)
@@ -153,6 +168,35 @@ final class ApprovalSenderTests: XCTestCase {
         XCTAssertEqual(automation.writtenValues, [], file: file, line: line)
         XCTAssertEqual(automation.sendCount, 0, file: file, line: line)
     }
+}
+
+@MainActor
+private final class SenderActivationGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+@MainActor
+private func waitUntilForSender(
+    _ condition: @escaping @MainActor () -> Bool,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    for _ in 0..<1_000 {
+        if condition() { return }
+        await Task.yield()
+    }
+    XCTFail("Condition was not met", file: file, line: line)
 }
 
 @MainActor

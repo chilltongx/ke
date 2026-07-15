@@ -2,6 +2,56 @@ import XCTest
 @testable import CodexQuickOKCore
 
 final class SessionStateStoreTests: XCTestCase {
+    func testLoadsLegacyISO8601DateFixture() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let fixture = #"{"sessionId":"legacy","state":"running","updatedAt":"1970-01-01T02:46:40Z","waitingSince":null,"cwd":"/tmp/legacy"}"#
+        try Data(fixture.utf8).write(to: directory.appendingPathComponent("legacy.json"))
+        let store = SessionStateStore(directory: directory)
+
+        let states = try await store.loadAll(
+            now: Date(timeIntervalSince1970: 10_000),
+            staleAfter: 43_200
+        )
+
+        XCTAssertEqual(states.count, 1)
+        XCTAssertEqual(states[0].sessionId, "legacy")
+        XCTAssertEqual(states[0].phase, .running)
+        XCTAssertEqual(states[0].updatedAt, Date(timeIntervalSince1970: 10_000))
+        XCTAssertEqual(states[0].cwd, "/tmp/legacy")
+    }
+
+    func testFilteredRemovalPreservesStatesNewerThanCutoff() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SessionStateStore(directory: directory)
+        let cutoff = Date(timeIntervalSince1970: 10_000)
+        try await store.save(
+            SessionState(sessionId: "old", phase: .running, updatedAt: cutoff)
+        )
+        try await store.save(
+            SessionState(
+                sessionId: "new",
+                phase: .waitingForApproval,
+                updatedAt: cutoff.addingTimeInterval(0.001)
+            )
+        )
+
+        try await store.removeAll(updatedAtOrBefore: cutoff)
+        let states = try await store.loadAll(
+            now: cutoff.addingTimeInterval(1),
+            staleAfter: 43_200
+        )
+
+        XCTAssertEqual(states.map(\.sessionId), ["new"])
+    }
+
     func testRoundTripsAndExpiresStaleSessions() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

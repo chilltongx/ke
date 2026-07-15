@@ -158,27 +158,57 @@ final class AppControllerTests: XCTestCase {
         XCTAssertEqual(panel.sendingValues, [true, false])
     }
 
-    func testTerminateThenLaunchIgnoresOlderSuspendedTermination() async throws {
+    func testTerminationRemovesOnlyStatesAtOrBeforeBoundary() async {
         let panel = FakePanel()
-        let store = ControlledSessionStore(suspendRemoval: true)
-        let controller = makeController(panel: panel, store: store)
+        let boundary = Date(timeIntervalSince1970: 100)
+        let store = ControlledSessionStore(
+            states: [Fixtures.waiting("old", updatedAt: boundary)]
+        )
+        let controller = makeController(panel: panel, store: store, now: { boundary })
 
         controller.processStateChanged(false)
+        await waitUntil { await store.removeCallCount == 1 }
+
+        let remaining = await store.currentStates
+        let cutoffs = await store.removalCutoffs
+        XCTAssertEqual(remaining, [])
+        XCTAssertEqual(cutoffs, [boundary])
+        XCTAssertEqual(panel.lastMode, .hidden)
+    }
+
+    func testTerminateThenLaunchWaitsForCleanupAndPreservesNewerState() async {
+        let panel = FakePanel()
+        let boundary = Date(timeIntervalSince1970: 100)
+        let old = Fixtures.waiting("old", updatedAt: boundary.addingTimeInterval(-1))
+        let relaunched = Fixtures.waiting(
+            "relaunched",
+            updatedAt: boundary.addingTimeInterval(1)
+        )
+        let store = ControlledSessionStore(states: [old], suspendRemoval: true)
+        let controller = makeController(panel: panel, store: store, now: { boundary })
+
+        controller.processStateChanged(false)
+        await waitUntil { await store.removeCallCount == 1 }
+        await store.insert(relaunched)
         controller.processStateChanged(true)
-        await waitUntil { await store.loadCallCount == 1 }
-        await store.resumeLoad(with: [Fixtures.waiting("relaunched")])
+        await spinMainActor()
+
+        let loadCountBeforeCleanup = await store.loadCallCount
+        XCTAssertEqual(loadCountBeforeCleanup, 0)
+
         await store.resumeRemovalIfNeeded()
+        await waitUntil { await store.loadCallCount == 1 }
         await waitUntil { controller.targetSessionId == "relaunched" }
 
         XCTAssertEqual(panel.lastMode, .waiting)
         XCTAssertEqual(controller.targetSessionId, "relaunched")
-        let removeCallCount = await store.removeCallCount
-        XCTAssertEqual(removeCallCount, 0)
+        let remaining = await store.currentStates
+        XCTAssertEqual(remaining.map(\.sessionId), ["relaunched"])
     }
 
     func testLaunchThenTerminatePreventsOlderLoadFromApplying() async throws {
         let panel = FakePanel()
-        let store = ControlledSessionStore()
+        let store = ControlledSessionStore(suspendLoad: true)
         let controller = makeController(panel: panel, store: store)
 
         controller.processStateChanged(true)
@@ -211,7 +241,11 @@ final class AppControllerTests: XCTestCase {
         )
         panel.onActivate?()
         await waitUntil { sender.callCount == 2 }
-        sender.emitReceipt(forCall: 1, sentAt: receiptDate)
+        sender.emitReceipt(
+            forCall: 1,
+            notBefore: receiptDate,
+            completedAt: receiptDate
+        )
 
         sender.finish(call: 0)
         await spinMainActor()
@@ -242,7 +276,11 @@ final class AppControllerTests: XCTestCase {
 
         panel.onActivate?()
         await waitUntil { sender.callCount == 1 }
-        sender.emitReceipt(forCall: 0, sentAt: receiptDate)
+        sender.emitReceipt(
+            forCall: 0,
+            notBefore: receiptDate,
+            completedAt: receiptDate
+        )
         controller.apply(
             states: [Fixtures.running("s1", updatedAt: receiptDate.addingTimeInterval(0.1))],
             codexRunning: true
@@ -265,7 +303,11 @@ final class AppControllerTests: XCTestCase {
 
         panel.onActivate?()
         await waitUntil { sender.callCount == 1 }
-        sender.emitReceipt(forCall: 0, sentAt: receiptDate)
+        sender.emitReceipt(
+            forCall: 0,
+            notBefore: receiptDate,
+            completedAt: receiptDate
+        )
         controller.apply(
             states: [Fixtures.running("s1", updatedAt: receiptDate.addingTimeInterval(-1))],
             codexRunning: true
@@ -278,11 +320,116 @@ final class AppControllerTests: XCTestCase {
         XCTAssertEqual(sender.sessionIds, ["s1"])
     }
 
+    func testConfirmationTimeoutStartsWhenSendActionCompletes() async throws {
+        let panel = FakePanel()
+        let sender = ControlledApprovalSender()
+        let controller = makeController(
+            panel: panel,
+            sender: sender,
+            confirmationTimeout: 0.03
+        )
+        let completedAt = Date()
+        let notBefore = completedAt.addingTimeInterval(-10)
+        controller.apply(
+            states: [Fixtures.waiting("s1", updatedAt: notBefore.addingTimeInterval(-1))],
+            codexRunning: true
+        )
+
+        panel.onActivate?()
+        await waitUntil { sender.callCount == 1 }
+        sender.emitReceipt(
+            forCall: 0,
+            notBefore: notBefore,
+            completedAt: completedAt
+        )
+        sender.finish(call: 0)
+        try await Task.sleep(for: .milliseconds(5))
+
+        XCTAssertEqual(panel.failures, [])
+
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(panel.failures, ["发送结果不确定，请检查 Codex"])
+    }
+
+    func testHookUpdateDuringPerformSendConfirmsWithRealSender() async {
+        let panel = FakePanel()
+        let automation = FakeCodexAutomation(
+            bundleId: "com.openai.codex",
+            matched: true,
+            value: ""
+        )
+        let notBefore = Date()
+        let hookUpdatedAt = notBefore.addingTimeInterval(0.001)
+        let completedAt = notBefore.addingTimeInterval(0.002)
+        var clockValues = [notBefore, completedAt]
+        let sender = ApprovalSender(
+            automation: automation,
+            now: { clockValues.removeFirst() }
+        )
+        let controller = makeController(
+            panel: panel,
+            sender: sender,
+            confirmationTimeout: 1
+        )
+        automation.onPerformSend = {
+            controller.apply(
+                states: [Fixtures.running("s1", updatedAt: hookUpdatedAt)],
+                codexRunning: true
+            )
+        }
+        controller.apply(
+            states: [Fixtures.waiting("s1", updatedAt: notBefore.addingTimeInterval(-1))],
+            codexRunning: true
+        )
+
+        panel.onActivate?()
+        await waitUntil { panel.successCount == 1 }
+
+        XCTAssertEqual(panel.failures, [])
+        XCTAssertEqual(automation.sendCount, 1)
+        XCTAssertEqual(panel.sendingValues, [true, false])
+    }
+
+    func testDuplicateRealSenderAttemptShowsExplicitInProgressFailure() async {
+        let panel = FakePanel()
+        let gate = ActivationGate()
+        let automation = FakeCodexAutomation(
+            bundleId: "com.openai.codex",
+            matched: true,
+            value: ""
+        )
+        automation.activationGate = { await gate.wait() }
+        var currentTarget = "s1"
+        let sender = ApprovalSender(
+            automation: automation,
+            isStillTarget: { $0 == currentTarget }
+        )
+        let controller = makeController(panel: panel, sender: sender)
+        controller.apply(states: [Fixtures.waiting("s1")], codexRunning: true)
+
+        panel.onActivate?()
+        await waitUntil { automation.activatedSessionIds == ["s1"] }
+        currentTarget = "s2"
+        controller.apply(states: [], codexRunning: false)
+        controller.apply(states: [Fixtures.waiting("s2")], codexRunning: true)
+        panel.onActivate?()
+        await waitUntil { !panel.failures.isEmpty }
+
+        XCTAssertEqual(panel.failures, ["上一次发送仍在进行，请稍后重试"])
+        XCTAssertEqual(automation.sendCount, 0)
+        XCTAssertEqual(panel.sendingValues, [true, false, true, false])
+
+        gate.release()
+        await spinMainActor()
+        XCTAssertEqual(automation.sendCount, 0)
+    }
+
     private func makeController(
         panel: FakePanel,
         sender: any ApprovalSending = FakeSender(),
         store: (any SessionStateStoring)? = nil,
-        confirmationTimeout: TimeInterval = 2
+        confirmationTimeout: TimeInterval = 2,
+        now: @escaping () -> Date = Date.init
     ) -> AppController {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -290,7 +437,8 @@ final class AppControllerTests: XCTestCase {
             store: store ?? SessionStateStore(directory: directory),
             panel: panel,
             sender: sender,
-            confirmationTimeout: confirmationTimeout
+            confirmationTimeout: confirmationTimeout,
+            now: now
         )
     }
 }
@@ -333,7 +481,8 @@ private final class FakeSender: ApprovalSending {
         onReceipt: @escaping @MainActor (ApprovalSendReceipt) -> Void
     ) async throws {
         sessionIds.append(sessionId)
-        onReceipt(ApprovalSendReceipt(sentAt: Date()))
+        let timestamp = Date()
+        onReceipt(ApprovalSendReceipt(notBefore: timestamp, completedAt: timestamp))
         if delay > 0 {
             try await Task.sleep(for: .seconds(delay))
         }
@@ -356,30 +505,45 @@ private enum Fixtures {
 }
 
 private actor ControlledSessionStore: SessionStateStoring {
+    private var states: [SessionState]
+    private let suspendLoad: Bool
     private let suspendRemoval: Bool
     private var loadContinuations: [CheckedContinuation<[SessionState], Error>] = []
     private var removalContinuation: CheckedContinuation<Void, Error>?
     private(set) var loadCallCount = 0
     private(set) var removeCallCount = 0
+    private(set) var removalCutoffs: [Date] = []
 
-    init(suspendRemoval: Bool = false) {
+    init(
+        states: [SessionState] = [],
+        suspendLoad: Bool = false,
+        suspendRemoval: Bool = false
+    ) {
+        self.states = states
+        self.suspendLoad = suspendLoad
         self.suspendRemoval = suspendRemoval
     }
 
+    var currentStates: [SessionState] { states }
+
     func loadAll(now: Date, staleAfter: TimeInterval) async throws -> [SessionState] {
         loadCallCount += 1
+        guard suspendLoad else { return states }
         return try await withCheckedThrowingContinuation { continuation in
             loadContinuations.append(continuation)
         }
     }
 
-    func removeAll() async throws {
+    func removeAll(updatedAtOrBefore cutoff: Date) async throws {
         removeCallCount += 1
-        guard suspendRemoval else { return }
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Void, Error>) in
-            removalContinuation = continuation
+        removalCutoffs.append(cutoff)
+        if suspendRemoval {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                removalContinuation = continuation
+            }
         }
+        states.removeAll { $0.updatedAt <= cutoff }
     }
 
     func resumeLoad(with states: [SessionState]) {
@@ -389,6 +553,11 @@ private actor ControlledSessionStore: SessionStateStoring {
     func resumeRemovalIfNeeded() {
         removalContinuation?.resume(returning: ())
         removalContinuation = nil
+    }
+
+    func insert(_ state: SessionState) {
+        states.removeAll { $0.sessionId == state.sessionId }
+        states.append(state)
     }
 }
 
@@ -420,8 +589,10 @@ private final class ControlledApprovalSender: ApprovalSending {
         }
     }
 
-    func emitReceipt(forCall index: Int, sentAt: Date) {
-        calls[index].onReceipt(ApprovalSendReceipt(sentAt: sentAt))
+    func emitReceipt(forCall index: Int, notBefore: Date, completedAt: Date) {
+        calls[index].onReceipt(
+            ApprovalSendReceipt(notBefore: notBefore, completedAt: completedAt)
+        )
     }
 
     func finish(call index: Int) {
@@ -447,6 +618,22 @@ private func waitUntil(
         await Task.yield()
     }
     XCTFail("Condition was not met", file: file, line: line)
+}
+
+@MainActor
+private final class ActivationGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
 }
 
 @MainActor
@@ -560,11 +747,7 @@ final class AppDelegateConfigurationTests: XCTestCase {
 
         XCTAssertEqual(termination, NSApplication.TerminateReply.terminateLater)
         XCTAssertTrue(delegate.isShuttingDown)
-        XCTAssertTrue(replies.isEmpty)
-        let earlyStopCount = await appServer.stopCount
-        XCTAssertEqual(earlyStopCount, 1)
 
-        await appServer.resumeStart()
         await waitUntil { !replies.isEmpty }
 
         XCTAssertEqual(replies, [true])
@@ -587,7 +770,6 @@ final class AppDelegateConfigurationTests: XCTestCase {
         _ = delegate?.applicationShouldTerminate(NSApplication.shared)
         delegate = nil
 
-        await appServer.resumeStart()
         await waitUntil { !replies.isEmpty }
         XCTAssertEqual(replies, [true])
         let stopCount = await appServer.stopCount
@@ -658,10 +840,9 @@ private actor ControlledAppServer: CodexAppServerServing {
     func stop() async {
         stopCount += 1
         events.append("stop")
-    }
-
-    func resumeStart() {
-        startContinuation?.resume()
-        startContinuation = nil
+        if stopCount == 1 {
+            startContinuation?.resume()
+            startContinuation = nil
+        }
     }
 }
