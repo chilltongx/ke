@@ -8,7 +8,7 @@ codex plugin remove codex-quick-ok --marketplace codex-quick-ok-local --json || 
 codex plugin marketplace remove codex-quick-ok-local --json || true
 
 if [[ -d "$APP" ]]; then
-  open -W "$APP" --args --unregister-login-item || true
+  open -n -W "$APP" --args --unregister-login-item || true
 fi
 
 rm -rf "$APP" "$SUPPORT"

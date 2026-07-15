@@ -102,9 +102,11 @@ fi
 if [[ -f "$ROOT/scripts/uninstall-local.sh" ]]; then
   expect_exact_line scripts/uninstall-local.sh 'APP="$HOME/Applications/Codex 可.app"'
   expect_exact_line scripts/uninstall-local.sh 'SUPPORT="$HOME/Library/Application Support/CodexQuickOK"'
+  expect_exact_line scripts/uninstall-local.sh '  open -n -W "$APP" --args --unregister-login-item || true'
   expect_exact_line scripts/uninstall-local.sh 'rm -rf "$APP" "$SUPPORT"'
   rm_lines="$(grep -E '^[[:space:]]*rm([[:space:]]|$)' "$ROOT/scripts/uninstall-local.sh" || true)"
   [[ "$rm_lines" == 'rm -rf "$APP" "$SUPPORT"' ]] || fail 'uninstall may only delete the two owned paths'
+  expect_absent_text scripts/uninstall-local.sh '^[[:space:]]*open -W "\$APP" --args --unregister-login-item'
   expect_absent_text scripts/uninstall-local.sh '\.codex/(config\.toml|hooks\.json)|tccutil|Accessibility'
 fi
 
