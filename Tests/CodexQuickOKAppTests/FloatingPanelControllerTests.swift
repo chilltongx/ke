@@ -106,6 +106,32 @@ final class FloatingPanelControllerTests: XCTestCase {
 
         controller.hide()
     }
+
+    func testSuccessReplacingFailureRestoresQuotaTooltipImmediately() {
+        let scheduler = ManualFeedbackScheduler()
+        let announcer = RecordingAccessibilityAnnouncer()
+        let controller = FloatingPanelController(
+            positionStore: PanelPositionStore(
+                defaults: UserDefaults(suiteName: #function)!
+            ),
+            reduceMotion: { true },
+            feedbackScheduler: scheduler,
+            accessibilityAnnouncer: announcer
+        )
+        controller.setQuota(nil)
+        let quotaTooltip = controller.button.toolTip
+
+        controller.showFailure("发送失败")
+        XCTAssertEqual(controller.button.toolTip, "发送失败")
+
+        controller.showSuccess()
+
+        XCTAssertEqual(controller.button.feedbackState, .success)
+        XCTAssertEqual(controller.button.toolTip, quotaTooltip)
+        XCTAssertEqual(scheduler.delay, 0.28, accuracy: 0.001)
+
+        controller.hide()
+    }
 }
 
 @MainActor

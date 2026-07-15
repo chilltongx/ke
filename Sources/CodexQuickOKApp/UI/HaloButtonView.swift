@@ -6,6 +6,21 @@ enum HaloFeedbackState: Equatable {
     case failure
 }
 
+enum HaloColorToken: Equatable {
+    case coal
+    case chalk
+    case mint
+    case amber
+    case red
+    case unavailable
+}
+
+struct HaloDrawingState: Equatable {
+    let sealFill: HaloColorToken
+    let glyph: HaloColorToken
+    let halo: HaloColorToken
+}
+
 @MainActor
 final class HaloButtonView: NSView {
     var onActivate: (() -> Void)?
@@ -18,6 +33,22 @@ final class HaloButtonView: NSView {
     private(set) var remainingPercent: Double?
     private(set) var feedbackState: HaloFeedbackState?
     private(set) var quotaToolTip = "周额度暂不可用"
+
+    var drawingState: HaloDrawingState {
+        if feedbackState == .success {
+            return HaloDrawingState(
+                sealFill: .mint,
+                glyph: .coal,
+                halo: .chalk
+            )
+        }
+        let percent = remainingPercent.map { min(100, max(0, $0)) }
+        return HaloDrawingState(
+            sealFill: .coal,
+            glyph: .chalk,
+            halo: CodexQuickOKColor.quotaToken(for: percent)
+        )
+    }
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: 64, height: 64)
@@ -66,6 +97,7 @@ final class HaloButtonView: NSView {
     }
 
     func showSuccessFeedback() {
+        toolTip = quotaToolTip
         feedbackState = .success
         setAccessibilityValue("批准成功")
         needsDisplay = true
@@ -89,7 +121,8 @@ final class HaloButtonView: NSView {
         let center = NSPoint(x: bounds.midX, y: bounds.midY)
         let ringRadius: CGFloat = 29
 
-        CodexQuickOKColor.coal.setFill()
+        let drawingState = drawingState
+        CodexQuickOKColor.value(for: drawingState.sealFill).setFill()
         NSBezierPath(
             ovalIn: NSRect(
                 x: center.x - ringRadius,
@@ -110,17 +143,16 @@ final class HaloButtonView: NSView {
             endAngle: 90 - 360 * CGFloat((percent ?? 100) / 100),
             clockwise: true
         )
-        let haloColor = feedbackState == .success
-            ? CodexQuickOKColor.mint
-            : CodexQuickOKColor.quota(for: percent)
-        haloColor.setStroke()
+        CodexQuickOKColor.value(for: drawingState.halo).setStroke()
         ring.stroke()
 
         let text = NSAttributedString(
             string: "可",
             attributes: [
                 .font: CodexQuickOKFont.approvalGlyph,
-                .foregroundColor: CodexQuickOKColor.chalk,
+                .foregroundColor: CodexQuickOKColor.value(
+                    for: drawingState.glyph
+                ),
             ]
         )
         let textSize = text.size()
@@ -142,11 +174,22 @@ private enum CodexQuickOKColor {
     static let red = NSColor(srgbRed: 0xFF / 255, green: 0x5A / 255, blue: 0x5F / 255, alpha: 1)
     static let unavailable = NSColor(srgbRed: 0x7C / 255, green: 0x80 / 255, blue: 0x87 / 255, alpha: 1)
 
-    static func quota(for remainingPercent: Double?) -> NSColor {
-        guard let remainingPercent else { return unavailable }
-        if remainingPercent < 20 { return red }
-        if remainingPercent <= 50 { return amber }
-        return mint
+    static func quotaToken(for remainingPercent: Double?) -> HaloColorToken {
+        guard let remainingPercent else { return .unavailable }
+        if remainingPercent < 20 { return .red }
+        if remainingPercent <= 50 { return .amber }
+        return .mint
+    }
+
+    static func value(for token: HaloColorToken) -> NSColor {
+        switch token {
+        case .coal: coal
+        case .chalk: chalk
+        case .mint: mint
+        case .amber: amber
+        case .red: red
+        case .unavailable: unavailable
+        }
     }
 }
 
