@@ -1,0 +1,6 @@
+.DS_Store
+.superpowers/
+work/
+outputs/
+.build/
+DerivedData/
