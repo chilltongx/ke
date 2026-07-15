@@ -24,8 +24,8 @@ public actor SessionStateStore {
     }
 
     public func save(_ state: SessionState) throws {
+        let url = try sessionFileURL(for: state.sessionId)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appendingPathComponent(state.sessionId).appendingPathExtension("json")
         try encoder.encode(state).write(to: url, options: [.atomic])
     }
 
@@ -46,7 +46,7 @@ public actor SessionStateStore {
     }
 
     public func remove(sessionId: String) throws {
-        let url = directory.appendingPathComponent(sessionId).appendingPathExtension("json")
+        let url = try sessionFileURL(for: sessionId)
         if fileManager.fileExists(atPath: url.path) { try fileManager.removeItem(at: url) }
     }
 
@@ -56,5 +56,16 @@ public actor SessionStateStore {
             where url.pathExtension == "json" {
             try fileManager.removeItem(at: url)
         }
+    }
+
+    private func sessionFileURL(for sessionId: String) throws -> URL {
+        guard !sessionId.isEmpty,
+              sessionId != ".",
+              sessionId != "..",
+              !sessionId.contains("/"),
+              !sessionId.contains("\0") else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        return directory.appendingPathComponent(sessionId).appendingPathExtension("json")
     }
 }
