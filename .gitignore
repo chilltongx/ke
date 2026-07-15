@@ -5,3 +5,4 @@ outputs/
 .build/
 DerivedData/
 .worktrees/
+dist/

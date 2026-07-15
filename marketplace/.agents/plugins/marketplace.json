@@ -1,0 +1,20 @@
+{
+  "name": "codex-quick-ok-local",
+  "interface": {
+    "displayName": "Codex Quick OK Local"
+  },
+  "plugins": [
+    {
+      "name": "codex-quick-ok",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-quick-ok"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
