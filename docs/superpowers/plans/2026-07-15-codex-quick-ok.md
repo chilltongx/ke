@@ -21,7 +21,9 @@
 - Treat only `windowDurationMins == 10080` as weekly quota; refresh every 300 seconds.
 - Confirm a send with same-session `UserPromptSubmit` within 2 seconds; never retry automatically.
 - Do not request Full Disk Access, Screen Recording, administrator access, or an OpenAI API key.
-- Do not read or persist full transcripts, credentials, clipboard history, or `last_assistant_message`.
+- Do not read or persist full transcripts, credentials, or clipboard history. A Hook may read
+  `last_assistant_message` only in memory for local approval classification; never persist, log,
+  or transmit its content.
 - Keep the canonical behavior aligned with `docs/superpowers/specs/2026-07-15-codex-quick-ok-design.md`.
 
 ---
