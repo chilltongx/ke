@@ -44,4 +44,36 @@ final class HaloButtonViewTests: XCTestCase {
             )
         )
     }
+
+    func testFailureReplacingSuccessInvalidatesInvertedSeal() {
+        let button = HaloButtonView(
+            frame: NSRect(x: 0, y: 0, width: 64, height: 64)
+        )
+        let window = NSWindow(
+            contentRect: button.bounds,
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = button
+        button.setQuota(nil)
+        button.showSuccessFeedback()
+        XCTAssertEqual(button.feedbackState, .success)
+        button.displayIfNeeded()
+        button.needsDisplay = false
+        XCTAssertFalse(button.needsDisplay)
+
+        button.showFailureFeedback("发送失败")
+
+        XCTAssertEqual(button.feedbackState, .failure)
+        XCTAssertTrue(button.needsDisplay)
+        XCTAssertEqual(
+            button.drawingState,
+            HaloDrawingState(
+                sealFill: .coal,
+                glyph: .chalk,
+                halo: .unavailable
+            )
+        )
+    }
 }

@@ -107,6 +107,7 @@ final class HaloButtonView: NSView {
         feedbackState = .failure
         toolTip = message
         setAccessibilityValue(message)
+        needsDisplay = true
     }
 
     func endFeedback() {
