@@ -4,3 +4,4 @@ work/
 outputs/
 .build/
 DerivedData/
+.worktrees/
