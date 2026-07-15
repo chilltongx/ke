@@ -108,6 +108,17 @@ final class ApprovalSenderTests: XCTestCase {
         await assertRejectedWithoutWriting(automation)
     }
 
+    func testUnreadableAXComposerValueNeverWritesOrPresses() async {
+        let automation = FakeCodexAutomation(
+            bundleId: "com.openai.codex",
+            matched: true,
+            value: ""
+        )
+        automation.composerError = AccessibilityClient.AXError.composerValueUnreadable
+
+        await assertRejectedWithoutWriting(automation)
+    }
+
     private func assertRejectedWithoutWriting(
         _ automation: FakeCodexAutomation,
         file: StaticString = #filePath,
@@ -211,6 +222,136 @@ final class AccessibilityClientSafetyTests: XCTestCase {
         ) { error in
             XCTAssertEqual(error as? AccessibilityClient.AXError, .sendActionMissing)
         }
+    }
+
+    func testSidebarTitleCannotMatchWrongActiveTaskWithSameCwd() async {
+        let elements = [
+            AccessibilityClient.ElementSummary(
+                parentIndex: nil,
+                role: "AXWindow",
+                subrole: nil,
+                title: nil,
+                description: nil,
+                value: nil,
+                enabled: true,
+                valueSettable: false
+            ),
+            AccessibilityClient.ElementSummary(
+                parentIndex: 0,
+                role: "AXGroup",
+                subrole: nil,
+                title: "Tasks",
+                description: nil,
+                value: nil,
+                enabled: true,
+                valueSettable: false
+            ),
+            AccessibilityClient.ElementSummary(
+                parentIndex: 1,
+                role: "AXStaticText",
+                subrole: nil,
+                title: "Requested task",
+                description: nil,
+                value: nil,
+                enabled: true,
+                valueSettable: false
+            ),
+            AccessibilityClient.ElementSummary(
+                parentIndex: 0,
+                role: "AXGroup",
+                subrole: "AXLandmarkMain",
+                title: nil,
+                description: nil,
+                value: nil,
+                enabled: true,
+                valueSettable: false
+            ),
+            AccessibilityClient.ElementSummary(
+                parentIndex: 3,
+                role: "AXHeading",
+                subrole: nil,
+                title: "Different active task",
+                description: nil,
+                value: nil,
+                enabled: true,
+                valueSettable: false
+            ),
+            AccessibilityClient.ElementSummary(
+                parentIndex: 3,
+                role: "AXStaticText",
+                subrole: nil,
+                title: nil,
+                description: nil,
+                value: "/tmp/shared-project",
+                enabled: true,
+                valueSettable: false
+            ),
+            AccessibilityClient.ElementSummary(
+                parentIndex: 3,
+                role: "AXTextArea",
+                subrole: nil,
+                title: nil,
+                description: "Message",
+                value: "",
+                enabled: true,
+                valueSettable: true
+            ),
+            AccessibilityClient.ElementSummary(
+                parentIndex: 3,
+                role: "AXButton",
+                subrole: nil,
+                title: "Send",
+                description: nil,
+                value: nil,
+                enabled: true,
+                valueSettable: false
+            ),
+        ]
+
+        let matched = try? AccessibilityClient.currentTaskMatches(
+            in: elements,
+            title: "Requested task",
+            cwd: "/tmp/shared-project"
+        )
+        XCTAssertEqual(matched, false)
+
+        let automation = FakeCodexAutomation(
+            bundleId: "com.openai.codex",
+            matched: matched ?? false,
+            value: ""
+        )
+        do {
+            try await ApprovalSender(automation: automation).sendOK(sessionId: "s1")
+            XCTFail("Expected wrong active task rejection")
+        } catch {}
+        XCTAssertEqual(automation.writtenValues, [])
+        XCTAssertEqual(automation.sendCount, 0)
+    }
+
+    func testUnreadableOrNonStringComposerValueFailsClosed() {
+        XCTAssertThrowsError(
+            try AccessibilityClient.validatedComposerValue(
+                attributeReadSucceeded: false,
+                value: nil
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .composerValueUnreadable
+            )
+        }
+        XCTAssertThrowsError(
+            try AccessibilityClient.validatedComposerValue(
+                attributeReadSucceeded: true,
+                value: nil
+            )
+        )
+        XCTAssertThrowsError(
+            try AccessibilityClient.validatedComposerValue(
+                attributeReadSucceeded: true,
+                value: NSNumber(value: 0)
+            )
+        )
     }
 }
 

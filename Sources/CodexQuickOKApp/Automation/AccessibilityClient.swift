@@ -22,16 +22,40 @@ final class AccessibilityClient: AccessibilityControlling {
         case taskNotFound
         case ambiguousTask
         case composerMissing
+        case composerValueUnreadable
         case nativeApprovalCard
         case sendActionMissing
     }
 
     struct ElementSummary: Equatable {
+        let parentIndex: Int?
         let role: String?
+        let subrole: String?
         let title: String?
         let description: String?
+        let value: String?
         let enabled: Bool
         let valueSettable: Bool
+
+        init(
+            parentIndex: Int? = nil,
+            role: String?,
+            subrole: String? = nil,
+            title: String?,
+            description: String?,
+            value: String? = nil,
+            enabled: Bool,
+            valueSettable: Bool
+        ) {
+            self.parentIndex = parentIndex
+            self.role = role
+            self.subrole = subrole
+            self.title = title
+            self.description = description
+            self.value = value
+            self.enabled = enabled
+            self.valueSettable = valueSettable
+        }
     }
 
     struct ControlSelection: Equatable {
@@ -45,6 +69,11 @@ final class AccessibilityClient: AccessibilityControlling {
 
     private var composer: AXUIElement?
     private var sendButton: AXUIElement?
+
+    private struct ElementTree {
+        let elements: [AXUIElement]
+        let summaries: [ElementSummary]
+    }
 
     func activateCodex() throws {
         guard AXIsProcessTrusted() else {
@@ -69,30 +98,41 @@ final class AccessibilityClient: AccessibilityControlling {
         let deadline = Date().addingTimeInterval(timeout)
 
         repeat {
-            if try currentTaskMatches(title: title, cwd: cwd) {
-                let elements = try descendants()
-                let selection = try Self.selectControls(
-                    in: elements.map(elementSummary)
+            do {
+                let tree = try elementTree()
+                let selection = try Self.selectActiveTaskControls(
+                    in: tree.summaries,
+                    title: title,
+                    cwd: cwd
                 )
-                composer = elements[selection.composerIndex]
-                sendButton = elements[selection.sendButtonIndex]
+                composer = tree.elements[selection.composerIndex]
+                sendButton = tree.elements[selection.sendButtonIndex]
                 return
+            } catch let error as AXError {
+                switch error {
+                case .taskNotFound, .composerMissing, .sendActionMissing:
+                    break
+                case .permissionMissing, .codexNotRunning, .ambiguousTask,
+                     .composerValueUnreadable, .nativeApprovalCard:
+                    throw error
+                }
             }
-            try await Task.sleep(for: .milliseconds(100))
+
+            if Date() < deadline {
+                try await Task.sleep(for: .milliseconds(100))
+            }
         } while Date() < deadline
 
         throw AXError.taskNotFound
     }
 
     func currentTaskMatches(title: String, cwd: String) throws -> Bool {
-        let strings = try descendants().flatMap { element in
-            [
-                string(element, kAXValueAttribute as CFString),
-                string(element, kAXTitleAttribute as CFString),
-                string(element, kAXDescriptionAttribute as CFString),
-            ].compactMap { $0 }
-        }
-        return strings.contains(title) && strings.contains(where: { $0.contains(cwd) })
+        let tree = try elementTree()
+        return try Self.currentTaskMatches(
+            in: tree.summaries,
+            title: title,
+            cwd: cwd
+        )
     }
 
     func frontmostBundleIdentifier() -> String? {
@@ -103,7 +143,16 @@ final class AccessibilityClient: AccessibilityControlling {
         guard let composer else {
             throw AXError.composerMissing
         }
-        return string(composer, kAXValueAttribute as CFString) ?? ""
+        var value: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(
+            composer,
+            kAXValueAttribute as CFString,
+            &value
+        )
+        return try Self.validatedComposerValue(
+            attributeReadSucceeded: result == .success,
+            value: value
+        )
     }
 
     func setComposerValue(_ value: String) throws {
@@ -178,6 +227,98 @@ final class AccessibilityClient: AccessibilityControlling {
         )
     }
 
+    static func currentTaskMatches(
+        in elements: [ElementSummary],
+        title: String,
+        cwd: String
+    ) throws -> Bool {
+        do {
+            _ = try selectActiveTaskControls(in: elements, title: title, cwd: cwd)
+            return true
+        } catch let error as AXError {
+            switch error {
+            case .taskNotFound, .composerMissing, .sendActionMissing:
+                return false
+            case .permissionMissing, .codexNotRunning, .ambiguousTask,
+                 .composerValueUnreadable, .nativeApprovalCard:
+                throw error
+            }
+        }
+    }
+
+    static func validatedComposerValue(
+        attributeReadSucceeded: Bool,
+        value: Any?
+    ) throws -> String {
+        guard attributeReadSucceeded, let value = value as? String else {
+            throw AXError.composerValueUnreadable
+        }
+        return value
+    }
+
+    private static func selectActiveTaskControls(
+        in elements: [ElementSummary],
+        title: String,
+        cwd: String
+    ) throws -> ControlSelection {
+        guard !elements.isEmpty, hasValidHierarchy(elements) else {
+            throw AXError.ambiguousTask
+        }
+
+        let mainRoots = elements.indices.filter {
+            elements[$0].subrole == kAXLandmarkMainSubrole as String
+        }
+        var controlOwners: [(root: Int, selection: ControlSelection)] = []
+
+        for root in mainRoots {
+            let indices = subtreeIndices(root: root, in: elements)
+            let subtree = indices.map { elements[$0] }
+            do {
+                let localSelection = try selectControls(in: subtree)
+                controlOwners.append(
+                    (
+                        root: root,
+                        selection: ControlSelection(
+                            composerIndex: indices[localSelection.composerIndex],
+                            sendButtonIndex: indices[localSelection.sendButtonIndex]
+                        )
+                    )
+                )
+            } catch let error as AXError {
+                switch error {
+                case .composerMissing, .sendActionMissing:
+                    continue
+                case .permissionMissing, .codexNotRunning, .taskNotFound,
+                     .ambiguousTask, .composerValueUnreadable, .nativeApprovalCard:
+                    throw error
+                }
+            }
+        }
+
+        let deepestOwners = controlOwners.filter { candidate in
+            !controlOwners.contains { other in
+                other.root != candidate.root
+                    && isDescendant(other.root, of: candidate.root, in: elements)
+            }
+        }
+        guard deepestOwners.count == 1, let owner = deepestOwners.first else {
+            throw deepestOwners.isEmpty ? AXError.taskNotFound : AXError.ambiguousTask
+        }
+
+        let activeIndices = subtreeIndices(root: owner.root, in: elements)
+        let strings = activeIndices.flatMap { index in
+            let element = elements[index]
+            return [element.value, element.title, element.description].compactMap { $0 }
+        }
+        guard strings.contains(title),
+              strings.contains(where: { $0.contains(cwd) })
+        else {
+            throw AXError.taskNotFound
+        }
+
+        return owner.selection
+    }
+
     private static func isNativeApprovalControl(_ element: ElementSummary) -> Bool {
         guard element.role == kAXButtonRole as String else {
             return false
@@ -198,7 +339,43 @@ final class AccessibilityClient: AccessibilityControlling {
         ).first
     }
 
-    private func descendants() throws -> [AXUIElement] {
+    private static func hasValidHierarchy(_ elements: [ElementSummary]) -> Bool {
+        for index in elements.indices {
+            guard let parent = elements[index].parentIndex else {
+                continue
+            }
+            guard elements.indices.contains(parent), parent < index else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func subtreeIndices(
+        root: Int,
+        in elements: [ElementSummary]
+    ) -> [Int] {
+        elements.indices.filter { index in
+            index == root || isDescendant(index, of: root, in: elements)
+        }
+    }
+
+    private static func isDescendant(
+        _ index: Int,
+        of ancestor: Int,
+        in elements: [ElementSummary]
+    ) -> Bool {
+        var current = elements[index].parentIndex
+        while let parent = current {
+            if parent == ancestor {
+                return true
+            }
+            current = elements[parent].parentIndex
+        }
+        return false
+    }
+
+    private func elementTree() throws -> ElementTree {
         guard let app = codexApplication() else {
             throw AXError.codexNotRunning
         }
@@ -215,14 +392,21 @@ final class AccessibilityClient: AccessibilityControlling {
         }
         let focusedWindow = focusedValue as! AXUIElement
 
-        var queue = [focusedWindow]
-        var result: [AXUIElement] = []
-        while !queue.isEmpty && result.count < 5_000 {
-            let element = queue.removeFirst()
-            result.append(element)
-            queue.append(contentsOf: children(element))
+        var queue: [(element: AXUIElement, parentIndex: Int?)] = [(focusedWindow, nil)]
+        var elements: [AXUIElement] = []
+        var summaries: [ElementSummary] = []
+        while !queue.isEmpty && elements.count < 5_000 {
+            let next = queue.removeFirst()
+            let index = elements.count
+            elements.append(next.element)
+            summaries.append(elementSummary(next.element, parentIndex: next.parentIndex))
+            queue.append(
+                contentsOf: children(next.element).map {
+                    (element: $0, parentIndex: Optional(index))
+                }
+            )
         }
-        return result
+        return ElementTree(elements: elements, summaries: summaries)
     }
 
     private func children(_ element: AXUIElement) -> [AXUIElement] {
@@ -237,7 +421,10 @@ final class AccessibilityClient: AccessibilityControlling {
         return value as? [AXUIElement] ?? []
     }
 
-    private func elementSummary(_ element: AXUIElement) -> ElementSummary {
+    private func elementSummary(
+        _ element: AXUIElement,
+        parentIndex: Int?
+    ) -> ElementSummary {
         var settable = DarwinBoolean(false)
         let settableResult = AXUIElementIsAttributeSettable(
             element,
@@ -245,9 +432,12 @@ final class AccessibilityClient: AccessibilityControlling {
             &settable
         )
         return ElementSummary(
+            parentIndex: parentIndex,
             role: string(element, kAXRoleAttribute as CFString),
+            subrole: string(element, kAXSubroleAttribute as CFString),
             title: string(element, kAXTitleAttribute as CFString),
             description: string(element, kAXDescriptionAttribute as CFString),
+            value: string(element, kAXValueAttribute as CFString),
             enabled: boolean(element, kAXEnabledAttribute as CFString) ?? true,
             valueSettable: settableResult == .success && settable.boolValue
         )
