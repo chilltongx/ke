@@ -47,6 +47,7 @@ Sources/CodexQuickOKApp/AppDelegate.swift          App lifecycle and login item
 Sources/CodexQuickOKApp/AppController.swift        Session, UI, quota, and send orchestration
 Sources/CodexQuickOKApp/SessionDirectoryMonitor.swift  State-directory file watching
 Sources/CodexQuickOKApp/CodexProcessMonitor.swift  Bundle launch/termination tracking
+Sources/CodexQuickOKApp/Quota/JSONValue.swift      Sendable JSON actor-boundary value
 Sources/CodexQuickOKApp/Quota/LineJSONRPCClient.swift  Newline JSON-RPC transport
 Sources/CodexQuickOKApp/Quota/CodexAppServerClient.swift Codex process and quota requests
 Sources/CodexQuickOKApp/UI/HaloButtonView.swift    Ring drawing, hover, and mouse events
@@ -660,13 +661,15 @@ git commit -m "feat(quota): Select exact weekly Codex window"
 ### Task 5: Codex App Server JSON-RPC Client
 
 **Files:**
+- Create: `Sources/CodexQuickOKApp/Quota/JSONValue.swift`
 - Create: `Sources/CodexQuickOKApp/Quota/LineJSONRPCClient.swift`
 - Create: `Sources/CodexQuickOKApp/Quota/CodexAppServerClient.swift`
 - Create: `Tests/CodexQuickOKAppTests/LineJSONRPCClientTests.swift`
 
 **Interfaces:**
 - Consumes: `RateLimitsReadResult` from Task 4.
-- Produces: actor `LineJSONRPCClient.request(method:params:)`, `sendNotification(method:params:)`, and `setNotificationHandler(_:)`.
+- Produces: a dependency-free, `Codable`, `Sendable` `JSONValue` actor-boundary type.
+- Produces: actor `LineJSONRPCClient.request(method:params:) -> JSONValue`, `sendNotification(method:params:)`, and `setNotificationHandler(_:)`.
 - Produces: actor `CodexAppServerClient.start()`, `readRateLimits()`, `readThreadMetadata(sessionId:)`, `setRateLimitUpdateHandler(_:)`, and `stop()`.
 
 - [ ] **Step 1: Write a failing codec test using pipes**
@@ -684,12 +687,12 @@ final class LineJSONRPCClientTests: XCTestCase {
         let task = Task { try await client.request(method: "account/rateLimits/read", params: [:]) }
 
         let requestData = output.fileHandleForReading.availableData
-        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: requestData) as? [String: Any])
-        let id = try XCTUnwrap(request["id"] as? Int)
+        let request = try JSONDecoder().decode(JSONValue.self, from: requestData)
+        let id = try XCTUnwrap(request.objectValue?["id"]?.integerValue)
         input.fileHandleForWriting.write(Data("{\"id\":\(id),\"result\":{\"ok\":true}}\n".utf8))
 
         let result = try await task.value
-        XCTAssertEqual(result["ok"] as? Bool, true)
+        XCTAssertEqual(result.objectValue?["ok"]?.boolValue, true)
     }
 }
 ```
@@ -703,6 +706,56 @@ Expected: FAIL with `cannot find 'LineJSONRPCClient' in scope`.
 - [ ] **Step 3: Implement newline JSON-RPC with one continuation per ID**
 
 ```swift
+// Sources/CodexQuickOKApp/Quota/JSONValue.swift
+import Foundation
+
+enum JSONValue: Codable, Equatable, Sendable {
+    case object([String: JSONValue])
+    case array([JSONValue])
+    case string(String)
+    case integer(Int)
+    case double(Double)
+    case bool(Bool)
+    case null
+
+    init(from decoder: Decoder) throws {
+        let box = try decoder.singleValueContainer()
+        if box.decodeNil() { self = .null }
+        else if let value = try? box.decode(Bool.self) { self = .bool(value) }
+        else if let value = try? box.decode(Int.self) { self = .integer(value) }
+        else if let value = try? box.decode(Double.self) { self = .double(value) }
+        else if let value = try? box.decode(String.self) { self = .string(value) }
+        else if let value = try? box.decode([JSONValue].self) { self = .array(value) }
+        else { self = .object(try box.decode([String: JSONValue].self)) }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var box = encoder.singleValueContainer()
+        switch self {
+        case .object(let value): try box.encode(value)
+        case .array(let value): try box.encode(value)
+        case .string(let value): try box.encode(value)
+        case .integer(let value): try box.encode(value)
+        case .double(let value): try box.encode(value)
+        case .bool(let value): try box.encode(value)
+        case .null: try box.encodeNil()
+        }
+    }
+
+    var objectValue: [String: JSONValue]? {
+        guard case .object(let value) = self else { return nil }
+        return value
+    }
+    var stringValue: String? { if case .string(let value) = self { value } else { nil } }
+    var integerValue: Int? { if case .integer(let value) = self { value } else { nil } }
+    var doubleValue: Double? {
+        switch self { case .integer(let value): Double(value); case .double(let value): value; default: nil }
+    }
+    var boolValue: Bool? { if case .bool(let value) = self { value } else { nil } }
+}
+```
+
+```swift
 // Sources/CodexQuickOKApp/Quota/LineJSONRPCClient.swift
 import Foundation
 
@@ -711,7 +764,7 @@ actor LineJSONRPCClient {
     private let input: FileHandle
     private let output: FileHandle
     private var nextId = 1
-    private var pending: [Int: CheckedContinuation<[String: Any], Error>] = [:]
+    private var pending: [Int: CheckedContinuation<JSONValue, Error>] = [:]
     private var readerTask: Task<Void, Never>?
     private var notificationHandler: (@Sendable (String) -> Void)?
 
@@ -720,22 +773,24 @@ actor LineJSONRPCClient {
         self.output = output
     }
 
-    func request(method: String, params: [String: Any]) async throws -> [String: Any] {
+    func request(method: String, params: [String: JSONValue]) async throws -> JSONValue {
         ensureReaderStarted()
         let id = nextId
         nextId += 1
-        let body: [String: Any] = ["method": method, "id": id, "params": params]
-        let data = try JSONSerialization.data(withJSONObject: body) + Data([0x0A])
+        let body = JSONValue.object([
+            "method": .string(method), "id": .integer(id), "params": .object(params)
+        ])
+        let data = try JSONEncoder().encode(body) + Data([0x0A])
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
             output.write(data)
         }
     }
 
-    func sendNotification(method: String, params: [String: Any]) throws {
+    func sendNotification(method: String, params: [String: JSONValue]) throws {
         ensureReaderStarted()
-        let body: [String: Any] = ["method": method, "params": params]
-        output.write(try JSONSerialization.data(withJSONObject: body) + Data([0x0A]))
+        let body = JSONValue.object(["method": .string(method), "params": .object(params)])
+        output.write(try JSONEncoder().encode(body) + Data([0x0A]))
     }
 
     func setNotificationHandler(_ handler: @escaping @Sendable (String) -> Void) {
@@ -751,16 +806,16 @@ actor LineJSONRPCClient {
         do {
             for try await line in input.bytes.lines {
                 guard let data = line.data(using: .utf8),
-                      let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                else { continue }
-                if let method = object["method"] as? String, object["id"] == nil {
+                      let message = try? JSONDecoder().decode(JSONValue.self, from: data),
+                      case .object(let object) = message else { continue }
+                if let method = object["method"]?.stringValue, object["id"] == nil {
                     notificationHandler?(method)
                     continue
                 }
-                guard let id = object["id"] as? Int,
+                guard let id = object["id"]?.integerValue,
                       let continuation = pending.removeValue(forKey: id) else { continue }
                 if let error = object["error"] { continuation.resume(throwing: RPCError.server(String(describing: error))) }
-                else if let result = object["result"] as? [String: Any] { continuation.resume(returning: result) }
+                else if let result = object["result"] { continuation.resume(returning: result) }
                 else { continuation.resume(throwing: RPCError.malformedResponse) }
             }
             for continuation in pending.values { continuation.resume(throwing: RPCError.closed) }
@@ -806,7 +861,10 @@ actor CodexAppServerClient {
         self.rpc = rpc
         do {
             _ = try await rpc.request(method: "initialize", params: [
-                "clientInfo": ["name":"codex_quick_ok", "title":"Codex 可", "version":"0.1.0"]
+                "clientInfo": .object([
+                    "name": .string("codex_quick_ok"), "title": .string("Codex 可"),
+                    "version": .string("0.1.0")
+                ])
             ])
             try await rpc.sendNotification(method: "initialized", params: [:])
         } catch {
@@ -820,25 +878,28 @@ actor CodexAppServerClient {
     func readRateLimits() async throws -> RateLimitsReadResult {
         guard let rpc else { throw ClientError.notStarted }
         let object = try await rpc.request(method: "account/rateLimits/read", params: [:])
-        let data = try JSONSerialization.data(withJSONObject: object)
+        let data = try JSONEncoder().encode(object)
         return try JSONDecoder().decode(RateLimitsReadResult.self, from: data)
     }
 
     func readThreadMetadata(sessionId: String) async throws -> ThreadMetadata {
         guard let rpc else { throw ClientError.notStarted }
         let result = try await rpc.request(
-            method: "thread/read", params: ["threadId": sessionId, "includeTurns": false]
+            method: "thread/read", params: [
+                "threadId": .string(sessionId), "includeTurns": .bool(false)
+            ]
         )
-        guard let thread = result["thread"] as? [String: Any],
-              let id = thread["id"] as? String,
-              let preview = thread["preview"] as? String,
-              let cwd = thread["cwd"] as? String,
-              let updatedAt = (thread["updatedAt"] as? NSNumber)?.doubleValue else {
+        guard let thread = result.objectValue?["thread"]?.objectValue,
+              let id = thread["id"]?.stringValue,
+              let preview = thread["preview"]?.stringValue,
+              let cwd = thread["cwd"]?.stringValue,
+              let updatedAt = thread["updatedAt"]?.doubleValue else {
             throw LineJSONRPCClient.RPCError.malformedResponse
         }
-        let name = thread["name"] as? String
+        let name = thread["name"]?.stringValue
+        let title = name.flatMap { $0.isEmpty ? nil : $0 } ?? preview
         return ThreadMetadata(
-            id: id, title: name?.isEmpty == false ? name! : preview,
+            id: id, title: title,
             cwd: cwd, updatedAt: Date(timeIntervalSince1970: updatedAt)
         )
     }
