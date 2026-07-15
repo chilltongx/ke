@@ -1,8 +1,9 @@
 import Foundation
 
 actor LineJSONRPCClient {
-    enum RPCError: Error {
+    enum RPCError: Error, Sendable {
         case closed
+        case transport(String)
         case server(String)
         case malformedResponse
     }
@@ -13,6 +14,7 @@ actor LineJSONRPCClient {
     private var pending: [Int: CheckedContinuation<JSONValue, Error>] = [:]
     private var readerTask: Task<Void, Never>?
     private var notificationHandler: (@Sendable (String) -> Void)?
+    private var terminalError: RPCError?
 
     init(input: FileHandle, output: FileHandle) {
         self.input = input
@@ -20,6 +22,9 @@ actor LineJSONRPCClient {
     }
 
     func request(method: String, params: [String: JSONValue]) async throws -> JSONValue {
+        if let terminalError {
+            throw terminalError
+        }
         ensureReaderStarted()
         let id = nextId
         nextId += 1
@@ -32,6 +37,9 @@ actor LineJSONRPCClient {
     }
 
     func sendNotification(method: String, params: [String: JSONValue]) throws {
+        if let terminalError {
+            throw terminalError
+        }
         ensureReaderStarted()
         let body = Request(method: method, id: nil, params: params)
         let data = try JSONEncoder().encode(body) + Data([0x0A])
@@ -43,7 +51,7 @@ actor LineJSONRPCClient {
     }
 
     private func ensureReaderStarted() {
-        guard readerTask == nil else { return }
+        guard terminalError == nil, readerTask == nil else { return }
         readerTask = Task { await self.readLoop() }
     }
 
@@ -76,16 +84,19 @@ actor LineJSONRPCClient {
                 }
             }
 
-            for continuation in pending.values {
-                continuation.resume(throwing: RPCError.closed)
-            }
-            pending.removeAll()
+            finish(with: .closed)
         } catch {
-            for continuation in pending.values {
-                continuation.resume(throwing: error)
-            }
-            pending.removeAll()
+            finish(with: .transport(String(describing: error)))
         }
+    }
+
+    private func finish(with error: RPCError) {
+        guard terminalError == nil else { return }
+        terminalError = error
+        for continuation in pending.values {
+            continuation.resume(throwing: error)
+        }
+        pending.removeAll()
     }
 }
 
