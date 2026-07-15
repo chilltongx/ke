@@ -20,6 +20,27 @@ final class SessionStateStoreTests: XCTestCase {
         XCTAssertEqual(staleSessions, [])
     }
 
+    func testRoundTripPreservesSubsecondHookTimestamp() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SessionStateStore(directory: directory)
+        let timestamp = Date(timeIntervalSince1970: 10_000.123_456)
+        try await store.save(
+            SessionState(
+                sessionId: "subsecond",
+                phase: .running,
+                updatedAt: timestamp,
+                waitingSince: timestamp
+            )
+        )
+
+        let states = try await store.loadAll(now: timestamp, staleAfter: 43_200)
+
+        XCTAssertEqual(states.first?.updatedAt, timestamp)
+        XCTAssertEqual(states.first?.waitingSince, timestamp)
+    }
+
     func testRejectsSessionIdsThatEscapeDirectory() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

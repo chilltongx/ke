@@ -95,9 +95,20 @@ actor CodexAppServerClient {
         }
     }
 
-    func stop() {
+    func stop() async {
         process?.terminate()
         process = nil
         rpc = nil
     }
 }
+
+protocol CodexAppServerServing: ThreadMetadataReading {
+    func start(codexBinary: URL) async throws
+    func readRateLimits() async throws -> RateLimitsReadResult
+    func setRateLimitUpdateHandler(
+        _ handler: @escaping @Sendable () -> Void
+    ) async throws
+    func stop() async
+}
+
+extension CodexAppServerClient: CodexAppServerServing {}

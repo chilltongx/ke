@@ -10,9 +10,23 @@ public actor SessionStateStore {
         self.directory = directory
         self.fileManager = fileManager
         self.encoder = JSONEncoder()
-        self.encoder.dateEncodingStrategy = .iso8601
+        self.encoder.dateEncodingStrategy = .secondsSince1970
         self.decoder = JSONDecoder()
-        self.decoder.dateDecodingStrategy = .iso8601
+        self.decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            if let seconds = try? container.decode(Double.self) {
+                return Date(timeIntervalSince1970: seconds)
+            }
+            let value = try container.decode(String.self)
+            let formatter = ISO8601DateFormatter()
+            guard let date = formatter.date(from: value) else {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "Expected a Unix timestamp or ISO-8601 date"
+                )
+            }
+            return date
+        }
     }
 
     public static func defaultDirectory() throws -> URL {

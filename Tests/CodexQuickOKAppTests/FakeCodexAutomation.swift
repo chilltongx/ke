@@ -17,6 +17,7 @@ final class FakeCodexAutomation: CodexAutomating {
     var activationError: Error?
     var composerError: Error?
     var sendError: Error?
+    var onPerformSend: (() -> Void)?
     private(set) var activatedSessionIds: [String] = []
     private(set) var writtenValues: [String] = []
     private(set) var sendCount = 0
@@ -62,6 +63,7 @@ final class FakeCodexAutomation: CodexAutomating {
             throw sendError
         }
         sendCount += 1
+        onPerformSend?()
     }
 }
 

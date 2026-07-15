@@ -18,6 +18,27 @@ final class ApprovalSenderTests: XCTestCase {
         XCTAssertEqual(automation.sendCount, 1)
     }
 
+    func testPublishesReceiptImmediatelyAfterSuccessfulSendAction() async throws {
+        let automation = FakeCodexAutomation(
+            bundleId: "com.openai.codex",
+            matched: true,
+            value: ""
+        )
+        let sentAt = Date(timeIntervalSince1970: 123.456)
+        var events: [String] = []
+        var receipt: ApprovalSendReceipt?
+        automation.onPerformSend = { events.append("performSend") }
+        let sender = ApprovalSender(automation: automation, now: { sentAt })
+
+        try await sender.sendOK(sessionId: "s1") { value in
+            events.append("receipt")
+            receipt = value
+        }
+
+        XCTAssertEqual(events, ["performSend", "receipt"])
+        XCTAssertEqual(receipt, ApprovalSendReceipt(sentAt: sentAt))
+    }
+
     func testRejectsWrongApplicationWithoutWriting() async {
         await assertRejectedWithoutWriting(
             FakeCodexAutomation(

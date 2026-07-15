@@ -8,18 +8,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static let codexBundleIdentifier = CodexProcessMonitor.codexBundleIdentifier
     static let quotaRefreshInterval: TimeInterval = 300
 
-    private let appServer = CodexAppServerClient()
+    private let appServer: any CodexAppServerServing
+    private let codexBinaryProvider: () throws -> URL
+    private let terminationReply: @MainActor (Bool) -> Void
     private var panel: FloatingPanelController?
     private var controller: AppController?
     private var sessionMonitor: SessionDirectoryMonitor?
     private var processMonitor: CodexProcessMonitor?
     private var quotaTimer: Timer?
-    private var appServerStarted = false
+    private(set) var isAppServerStarted = false
     private var reconnectAttempt = 0
     private var reconnectTask: Task<Void, Never>?
     private var appServerStartTask: Task<Void, Never>?
+    private var shutdownTask: Task<Void, Never>?
+    private var shutdownFinished = false
 
     private(set) var isShuttingDown = false
+
+    override convenience init() {
+        self.init(
+            appServer: CodexAppServerClient(),
+            codexBinaryProvider: Self.installedCodexBinaryURL,
+            terminationReply: { NSApplication.shared.reply(toApplicationShouldTerminate: $0) }
+        )
+    }
+
+    init(
+        appServer: any CodexAppServerServing,
+        codexBinaryProvider: @escaping () throws -> URL,
+        terminationReply: @escaping @MainActor (Bool) -> Void
+    ) {
+        self.appServer = appServer
+        self.codexBinaryProvider = codexBinaryProvider
+        self.terminationReply = terminationReply
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--unregister-login-item") {
@@ -43,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let panel = FloatingPanelController()
         let automation = SystemCodexAutomation(
             accessibility: AccessibilityClient(),
-            appServer: appServer
+            metadataReader: appServer
         )
         let sender = ApprovalSender(automation: automation) { sessionId in
             let states = (try? await store.loadAll(now: Date(), staleAfter: 43_200)) ?? []
@@ -72,9 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         processMonitor.onChange = { [weak controller] running in
-            Task { @MainActor in
-                await controller?.updateCodexRunning(running)
-            }
+            controller?.processStateChanged(running)
         }
 
         do {
@@ -92,22 +113,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.refreshQuota()
             }
         }
-        appServerStartTask = Task { @MainActor [weak self] in
-            await self?.startAppServer()
-        }
+        beginAppServerStart()
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    func applicationShouldTerminate(
+        _ sender: NSApplication
+    ) -> NSApplication.TerminateReply {
+        if shutdownFinished { return .terminateNow }
+        if isShuttingDown { return .terminateLater }
+
         isShuttingDown = true
         quotaTimer?.invalidate()
         reconnectTask?.cancel()
-        appServerStartTask?.cancel()
         controller?.stop()
         sessionMonitor?.stop()
         processMonitor?.stop()
-        Task {
+
+        let startTask = appServerStartTask
+        startTask?.cancel()
+        shutdownTask = Task { @MainActor [self] in
             await appServer.stop()
+            await startTask?.value
+            await appServer.stop()
+            isAppServerStarted = false
+            shutdownFinished = true
+            terminationReply(true)
+            shutdownTask = nil
         }
+        return .terminateLater
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        quotaTimer?.invalidate()
+        reconnectTask?.cancel()
+        controller?.stop()
+        sessionMonitor?.stop()
+        processMonitor?.stop()
     }
 
     static func reconnectDelay(forAttempt attempt: Int) -> TimeInterval {
@@ -127,10 +168,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return binary
     }
 
+    func beginAppServerStart() {
+        guard !isShuttingDown, appServerStartTask == nil else { return }
+        appServerStartTask = Task { @MainActor [weak self] in
+            await self?.startAppServer()
+        }
+    }
+
     private func startAppServer() async {
         guard !isShuttingDown, !Task.isCancelled else { return }
         do {
-            let binary = try Self.installedCodexBinaryURL()
+            let binary = try codexBinaryProvider()
             try await appServer.start(codexBinary: binary)
             try await appServer.setRateLimitUpdateHandler { [weak self] in
                 Task { @MainActor in
@@ -138,16 +186,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             guard !isShuttingDown, !Task.isCancelled else {
-                await appServer.stop()
+                appServerStartTask = nil
                 return
             }
-            appServerStarted = true
+            isAppServerStarted = true
             reconnectAttempt = 0
             appServerStartTask = nil
             refreshQuota()
         } catch {
             appServerStartTask = nil
-            appServerStarted = false
+            isAppServerStarted = false
             panel?.setQuota(nil)
             guard !isShuttingDown else { return }
             scheduleReconnect()
@@ -155,7 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshQuota() {
-        guard !isShuttingDown, appServerStarted else {
+        guard !isShuttingDown, isAppServerStarted else {
             panel?.setQuota(nil)
             return
         }
@@ -165,7 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let result = try await appServer.readRateLimits()
                 panel?.setQuota(QuotaSelector.weeklyQuota(from: result))
             } catch {
-                appServerStarted = false
+                isAppServerStarted = false
                 panel?.setQuota(nil)
                 await appServer.stop()
                 scheduleReconnect()
@@ -185,9 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             guard !Task.isCancelled, let self else { return }
             reconnectTask = nil
-            appServerStartTask = Task { @MainActor [weak self] in
-                await self?.startAppServer()
-            }
+            beginAppServerStart()
         }
     }
 
