@@ -46,6 +46,10 @@ for script in scripts/build-release.sh scripts/install-local.sh scripts/uninstal
   expect_executable "$script"
 done
 
+expect_file scripts/render-app-icon.swift
+expect_executable scripts/render-app-icon.swift
+expect_executable Tests/AppIconTests.sh
+
 expect_exact_line .gitignore 'dist/'
 
 if [[ -f "$ROOT/Resources/Info.plist" ]]; then
@@ -53,7 +57,8 @@ if [[ -f "$ROOT/Resources/Info.plist" ]]; then
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$ROOT/Resources/Info.plist" 2>/dev/null)" == com.codexquickok.CodexQuickOK ]] || fail 'unexpected CFBundleIdentifier'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 'Codex 可' ]] || fail 'unexpected CFBundleName'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 0.1.0 ]] || fail 'unexpected short version'
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 1 ]] || fail 'unexpected bundle version'
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$ROOT/Resources/Info.plist" 2>/dev/null)" == AppIcon ]] || fail 'CFBundleIconFile must be AppIcon'
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 2 ]] || fail 'bundle version must be 2'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 14.0 ]] || fail 'unexpected minimum system version'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$ROOT/Resources/Info.plist" 2>/dev/null)" == true ]] || fail 'LSUIElement must be true'
 fi
@@ -89,6 +94,9 @@ fi
 if [[ -f "$ROOT/scripts/build-release.sh" ]]; then
   expect_exact_line scripts/build-release.sh 'swift build --package-path "$ROOT" -c release'
   expect_exact_line scripts/build-release.sh 'rm -rf "$ROOT/dist"'
+  expect_exact_line scripts/build-release.sh '"$ROOT/scripts/render-app-icon.swift" "$ICONSET"'
+  expect_exact_line scripts/build-release.sh 'iconutil -c icns "$ICONSET" -o "$ICON_BUILD_DIR/AppIcon.icns"'
+  expect_exact_line scripts/build-release.sh 'cp "$ICON_BUILD_DIR/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"'
   expect_exact_line scripts/build-release.sh 'codesign --verify --deep --strict "$APP"'
 fi
 
@@ -96,6 +104,9 @@ if [[ -f "$ROOT/scripts/install-local.sh" ]]; then
   expect_exact_line scripts/install-local.sh 'DEST_APP="$HOME/Applications/Codex 可.app"'
   expect_exact_line scripts/install-local.sh 'codex plugin marketplace add "$ROOT/dist/marketplace" --json'
   expect_exact_line scripts/install-local.sh 'codex plugin add codex-quick-ok --marketplace codex-quick-ok-local --json'
+  expect_exact_line scripts/install-local.sh '"$LSREGISTER" -f "$DEST_APP"'
+  expect_exact_line scripts/install-local.sh 'touch "$DEST_APP"'
+  expect_exact_line scripts/install-local.sh 'killall Dock || true'
   expect_absent_text scripts/install-local.sh 'hooks\.json|config\.toml'
 fi
 

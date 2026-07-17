@@ -99,3 +99,14 @@ have not been executed as part of this record.
 7. Only after every row is PASS, copy the rebuilt app and plugin ZIP to the final
    user-facing output directory. Do not treat the current `dist` candidates as
    manually verified deliverables.
+
+## Dock icon regression
+
+- Verification date: `2026-07-17` (`Asia/Shanghai`).
+- [x] Installed bundle declares `CFBundleIconFile = AppIcon`.
+- [x] Installed bundle contains a non-empty `Contents/Resources/AppIcon.icns`.
+- [ ] Dock shows the coal-gray “可” icon instead of a question mark. The existing
+  Dock item still resolves to `~/Applications/Codex 可.app`; visual confirmation is
+  pending because the Dock remained auto-hidden during the automated screenshot.
+- [ ] Clicking the Dock tile launches `Codex 可`. The installer reopened the new
+  build successfully, but the Dock tile was deliberately not clicked automatically.
