@@ -26,7 +26,8 @@ if (( ${#identity_hashes} != 1 )); then
   exit 78
 fi
 identity_sha1="${identity_hashes[1]}"
-DESIGNATED_REQUIREMENT="designated => identifier \"$BUNDLE_IDENTIFIER\" and certificate leaf = H\"$identity_sha1\""
+DESIGNATED_REQUIREMENT_EXPRESSION="identifier \"$BUNDLE_IDENTIFIER\" and certificate leaf = H\"$identity_sha1\""
+DESIGNATED_REQUIREMENT="designated => $DESIGNATED_REQUIREMENT_EXPRESSION"
 
 swift build --package-path "$ROOT" -c release
 
@@ -56,4 +57,4 @@ cp "$ROOT/marketplace/.agents/plugins/marketplace.json" \
 
 test -s "$APP/Contents/Resources/AppIcon.icns"
 "$CODESIGN" --force --timestamp=none --sign "$identity_sha1" --keychain "$LOGIN_KEYCHAIN" --requirements "=$DESIGNATED_REQUIREMENT" "$APP"
-"$CODESIGN" --verify --deep --strict --test-requirement "=$DESIGNATED_REQUIREMENT" "$APP"
+"$CODESIGN" --verify --deep --strict --test-requirement "=$DESIGNATED_REQUIREMENT_EXPRESSION" "$APP"

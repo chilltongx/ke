@@ -31,8 +31,12 @@ fi
 
 identity_hashes=()
 find_identity_hashes() {
-  local line remainder sha1 common_name
+  local identity_output line remainder sha1 common_name
   identity_hashes=()
+  if ! identity_output="$("$SECURITY" find-identity -p codesigning "$LOGIN_KEYCHAIN")"; then
+    print -u2 -- 'Unable to query code-signing identities from the login keychain.'
+    return 70
+  fi
   while IFS= read -r line; do
     [[ "$line" == *') '*'"'* ]] || continue
     remainder="${line#*) }"
@@ -42,7 +46,7 @@ find_identity_hashes() {
     if [[ "$common_name" == "$SIGNING_IDENTITY_NAME" && ${#sha1} -eq 40 && "$sha1" != *[^[:xdigit:]]* ]]; then
       identity_hashes+=("$sha1")
     fi
-  done < <("$SECURITY" find-identity -p codesigning "$LOGIN_KEYCHAIN")
+  done <<< "$identity_output"
 }
 
 verify_codesigning_identity() {
@@ -53,12 +57,50 @@ verify_codesigning_identity() {
   "$CODESIGN" --verify --strict "$probe"
 }
 
+export_certificate_for_identity() {
+  local identity_sha1="$1"
+  local candidate candidate_sha1
+  local matching_certificates=()
+
+  mkdir -p "$CERTIFICATE_CANDIDATES_DIR"
+  "$SECURITY" find-certificate -a -c "$SIGNING_IDENTITY_NAME" -p "$LOGIN_KEYCHAIN" > "$CERTIFICATE_CANDIDATES_PEM"
+  awk -v directory="$CERTIFICATE_CANDIDATES_DIR" '
+    /-----BEGIN CERTIFICATE-----/ {
+      count += 1
+      output = sprintf("%s/candidate-%d.pem", directory, count)
+    }
+    output != "" { print > output }
+    /-----END CERTIFICATE-----/ {
+      close(output)
+      output = ""
+    }
+  ' "$CERTIFICATE_CANDIDATES_PEM"
+
+  for candidate in "$CERTIFICATE_CANDIDATES_DIR"/*.pem(N); do
+    candidate_sha1="$("$OPENSSL" x509 -in "$candidate" -noout -fingerprint -sha1)"
+    candidate_sha1="${candidate_sha1#*=}"
+    candidate_sha1="${candidate_sha1//:/}"
+    candidate_sha1="${(U)candidate_sha1}"
+    [[ "$candidate_sha1" == "$identity_sha1" ]] || continue
+    matching_certificates+=("$candidate")
+  done
+
+  if (( ${#matching_certificates} != 1 )); then
+    print -u2 -- "Could not uniquely match identity $identity_sha1 to its certificate."
+    exit 65
+  fi
+  cp "$matching_certificates[1]" "$CERTIFICATE_PEM"
+}
+
 WORK="$(mktemp -d)"
 CERTIFICATE_PEM="$WORK/certificate.pem"
+CERTIFICATE_CANDIDATES_PEM="$WORK/certificate-candidates.pem"
+CERTIFICATE_CANDIDATES_DIR="$WORK/certificate-candidates"
 PRIVATE_KEY_PEM="$WORK/private-key.pem"
 IDENTITY_P12="$WORK/identity.p12"
 OPENSSL_CONFIG="$WORK/openssl.cnf"
 PROBE="$WORK/codesign-probe"
+P12_PASSWORD="$("$OPENSSL" rand -hex 32)"
 
 find_identity_hashes
 if (( ${#identity_hashes} > 1 )); then
@@ -68,7 +110,7 @@ fi
 
 if (( ${#identity_hashes} == 1 )); then
   identity_sha1="${identity_hashes[1]}"
-  "$SECURITY" find-certificate -c "$SIGNING_IDENTITY_NAME" -p "$LOGIN_KEYCHAIN" > "$CERTIFICATE_PEM"
+  export_certificate_for_identity "$identity_sha1"
   if ! "$SECURITY" verify-cert -c "$CERTIFICATE_PEM" -p codeSign -k "$LOGIN_KEYCHAIN" >/dev/null 2>&1; then
     "$SECURITY" add-trusted-cert -r trustRoot -p codeSign -k "$LOGIN_KEYCHAIN" "$CERTIFICATE_PEM"
   fi
@@ -99,9 +141,9 @@ CONFIG
 "$OPENSSL" req -new -x509 -newkey rsa:3072 -sha256 -days 3650 -nodes \
   -config "$OPENSSL_CONFIG" -keyout "$PRIVATE_KEY_PEM" -out "$CERTIFICATE_PEM"
 "$OPENSSL" pkcs12 -export -inkey "$PRIVATE_KEY_PEM" -in "$CERTIFICATE_PEM" \
-  -name "$SIGNING_IDENTITY_NAME" -out "$IDENTITY_P12" -passout pass:
+  -name "$SIGNING_IDENTITY_NAME" -out "$IDENTITY_P12" -passout "pass:$P12_PASSWORD"
 
-"$SECURITY" import "$IDENTITY_P12" -k "$LOGIN_KEYCHAIN" -P "" -T /usr/bin/codesign
+"$SECURITY" import "$IDENTITY_P12" -k "$LOGIN_KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign
 "$SECURITY" add-trusted-cert -r trustRoot -p codeSign -k "$LOGIN_KEYCHAIN" "$CERTIFICATE_PEM"
 "$SECURITY" verify-cert -c "$CERTIFICATE_PEM" -p codeSign -k "$LOGIN_KEYCHAIN"
 
