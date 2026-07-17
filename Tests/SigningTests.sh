@@ -119,4 +119,53 @@ grep -Fq 'Unable to query code-signing identities from the login keychain.' "$WO
   || fail 'setup did not explain the failed identity query'
 test ! -e "$OPENSSL_MARKER" || fail 'setup generated key material after identity query failure'
 
+FAKE_DEDUP_SECURITY="$WORK/dedup-security"
+FAKE_DEDUP_OPENSSL="$WORK/dedup-openssl"
+FAKE_DEDUP_CODESIGN="$WORK/dedup-codesign"
+cat > "$FAKE_DEDUP_SECURITY" <<'SCRIPT'
+#!/bin/zsh
+case "${1:-}" in
+  find-identity)
+    print '  1) CA25F15FECEACBC83936E31F3EAC0E994A447338 "Codex Quick OK Local Signing"'
+    print '  1) CA25F15FECEACBC83936E31F3EAC0E994A447338 "Codex Quick OK Local Signing"'
+    ;;
+  find-certificate)
+    print '%s\n' '-----BEGIN CERTIFICATE-----' 'ZmFrZQ==' '-----END CERTIFICATE-----'
+    ;;
+  verify-cert)
+    ;;
+  *)
+    exit 72
+    ;;
+esac
+SCRIPT
+cat > "$FAKE_DEDUP_OPENSSL" <<'SCRIPT'
+#!/bin/zsh
+case "${1:-}" in
+  rand)
+    print '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+    ;;
+  x509)
+    print 'sha1 Fingerprint=CA:25:F1:5F:EC:EA:CB:C8:39:36:E3:1F:3E:AC:0E:99:4A:44:73:38'
+    ;;
+  *)
+    exit 73
+    ;;
+esac
+SCRIPT
+cat > "$FAKE_DEDUP_CODESIGN" <<'SCRIPT'
+#!/bin/zsh
+exit 0
+SCRIPT
+chmod +x "$FAKE_DEDUP_SECURITY" "$FAKE_DEDUP_OPENSSL" "$FAKE_DEDUP_CODESIGN"
+
+CODEX_QUICK_OK_SECURITY="$FAKE_DEDUP_SECURITY" \
+  CODEX_QUICK_OK_OPENSSL="$FAKE_DEDUP_OPENSSL" \
+  CODEX_QUICK_OK_CODESIGN="$FAKE_DEDUP_CODESIGN" \
+  CODEX_QUICK_OK_KEYCHAIN="$WORK/login.keychain-db" \
+  zsh "$SETUP" >"$WORK/dedup-stdout" 2>"$WORK/dedup-stderr" \
+  || fail 'setup treated one identity repeated across security output sections as duplicates'
+grep -Fq 'Signing identity is ready: Codex Quick OK Local Signing' "$WORK/dedup-stdout" \
+  || fail 'setup did not complete the idempotent existing-identity path'
+
 print 'Stable signing checks passed.'

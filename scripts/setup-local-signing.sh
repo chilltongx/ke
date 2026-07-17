@@ -31,7 +31,7 @@ fi
 
 identity_hashes=()
 find_identity_hashes() {
-  local identity_output line remainder sha1 common_name
+  local identity_output line remainder sha1 common_name existing already_seen
   identity_hashes=()
   if ! identity_output="$("$SECURITY" find-identity -p codesigning "$LOGIN_KEYCHAIN")"; then
     print -u2 -- 'Unable to query code-signing identities from the login keychain.'
@@ -44,7 +44,14 @@ find_identity_hashes() {
     common_name="${line#*\"}"
     common_name="${common_name%%\"*}"
     if [[ "$common_name" == "$SIGNING_IDENTITY_NAME" && ${#sha1} -eq 40 && "$sha1" != *[^[:xdigit:]]* ]]; then
-      identity_hashes+=("$sha1")
+      already_seen=false
+      for existing in "${identity_hashes[@]}"; do
+        if [[ "$existing" == "$sha1" ]]; then
+          already_seen=true
+          break
+        fi
+      done
+      [[ "$already_seen" == true ]] || identity_hashes+=("$sha1")
     fi
   done <<< "$identity_output"
 }
