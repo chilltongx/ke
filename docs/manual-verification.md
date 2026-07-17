@@ -110,3 +110,20 @@ have not been executed as part of this record.
   pending because the Dock remained auto-hidden during the automated screenshot.
 - [ ] Clicking the Dock tile launches `Codex 可`. The installer reopened the new
   build successfully, but the Dock tile was deliberately not clicked automatically.
+
+## Stable signing migration
+
+- Source migration date: `2026-07-17` (`Asia/Shanghai`).
+- [x] Build `3` source requires `Codex Quick OK Local Signing` and has no automatic
+  ad-hoc fallback.
+- [x] The embedded designated requirement is defined by the leaf certificate SHA-1
+  and bundle identifier `com.codexquickok.CodexQuickOK`.
+- [x] The setup path is limited to a dedicated identity in the login keychain and
+  user-domain `codeSign` policy trust; it does not add administrator/system trust.
+- [ ] Run `zsh scripts/setup-local-signing.sh` once and accept any interactive macOS
+  confirmation. This source-only change deliberately did not access the Keychain.
+- [ ] Rebuild and install build `3`, then re-grant Accessibility once. The prior
+  ad-hoc build used a content-hash identity, so this one-time migration cannot retain
+  its existing TCC grant.
+- [ ] On the next build signed by the same certificate, verify Accessibility remains
+  granted without toggling the permission.

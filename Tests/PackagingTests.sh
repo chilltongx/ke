@@ -36,19 +36,21 @@ for file in \
   Resources/PrivacyInfo.xcprivacy \
   marketplace/.agents/plugins/marketplace.json \
   scripts/build-release.sh \
+  scripts/setup-local-signing.sh \
   scripts/install-local.sh \
   scripts/uninstall-local.sh \
   README.md; do
   expect_file "$file"
 done
 
-for script in scripts/build-release.sh scripts/install-local.sh scripts/uninstall-local.sh; do
+for script in scripts/build-release.sh scripts/setup-local-signing.sh scripts/install-local.sh scripts/uninstall-local.sh; do
   expect_executable "$script"
 done
 
 expect_file scripts/render-app-icon.swift
 expect_executable scripts/render-app-icon.swift
 expect_executable Tests/AppIconTests.sh
+expect_executable Tests/SigningTests.sh
 
 expect_exact_line .gitignore 'dist/'
 
@@ -58,7 +60,7 @@ if [[ -f "$ROOT/Resources/Info.plist" ]]; then
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 'Codex 可' ]] || fail 'unexpected CFBundleName'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 0.1.0 ]] || fail 'unexpected short version'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$ROOT/Resources/Info.plist" 2>/dev/null)" == AppIcon ]] || fail 'CFBundleIconFile must be AppIcon'
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 2 ]] || fail 'bundle version must be 2'
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 3 ]] || fail 'bundle version must be 3'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 14.0 ]] || fail 'unexpected minimum system version'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$ROOT/Resources/Info.plist" 2>/dev/null)" == true ]] || fail 'LSUIElement must be true'
 fi
@@ -97,7 +99,9 @@ if [[ -f "$ROOT/scripts/build-release.sh" ]]; then
   expect_exact_line scripts/build-release.sh '"$ROOT/scripts/render-app-icon.swift" "$ICONSET"'
   expect_exact_line scripts/build-release.sh 'iconutil -c icns "$ICONSET" -o "$ICON_BUILD_DIR/AppIcon.icns"'
   expect_exact_line scripts/build-release.sh 'cp "$ICON_BUILD_DIR/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"'
-  expect_exact_line scripts/build-release.sh 'codesign --verify --deep --strict "$APP"'
+  expect_exact_line scripts/build-release.sh 'SIGNING_IDENTITY_NAME="${CODEX_QUICK_OK_SIGNING_IDENTITY:-Codex Quick OK Local Signing}"'
+  expect_exact_line scripts/build-release.sh '"$CODESIGN" --force --timestamp=none --sign "$identity_sha1" --keychain "$LOGIN_KEYCHAIN" --requirements "=$DESIGNATED_REQUIREMENT" "$APP"'
+  expect_exact_line scripts/build-release.sh '"$CODESIGN" --verify --deep --strict --test-requirement "=$DESIGNATED_REQUIREMENT" "$APP"'
 fi
 
 if [[ -f "$ROOT/scripts/install-local.sh" ]]; then

@@ -2,6 +2,31 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SIGNING_IDENTITY_NAME="${CODEX_QUICK_OK_SIGNING_IDENTITY:-Codex Quick OK Local Signing}"
+LOGIN_KEYCHAIN="${CODEX_QUICK_OK_KEYCHAIN:-$HOME/Library/Keychains/login.keychain-db}"
+SECURITY="${CODEX_QUICK_OK_SECURITY:-/usr/bin/security}"
+CODESIGN="${CODEX_QUICK_OK_CODESIGN:-/usr/bin/codesign}"
+BUNDLE_IDENTIFIER="com.codexquickok.CodexQuickOK"
+
+identity_hashes=()
+while IFS= read -r line; do
+  [[ "$line" == *') '*'"'* ]] || continue
+  remainder="${line#*) }"
+  sha1="${remainder%% *}"
+  common_name="${line#*\"}"
+  common_name="${common_name%%\"*}"
+  if [[ "$common_name" == "$SIGNING_IDENTITY_NAME" && ${#sha1} -eq 40 && "$sha1" != *[^[:xdigit:]]* ]]; then
+    identity_hashes+=("$sha1")
+  fi
+done < <("$SECURITY" find-identity -v -p codesigning "$LOGIN_KEYCHAIN")
+
+if (( ${#identity_hashes} != 1 )); then
+  print -u2 -- "No unique valid code-signing identity named \"$SIGNING_IDENTITY_NAME\"."
+  print -u2 -- "Run: zsh \"$ROOT/scripts/setup-local-signing.sh\""
+  exit 78
+fi
+identity_sha1="${identity_hashes[1]}"
+DESIGNATED_REQUIREMENT="designated => identifier \"$BUNDLE_IDENTIFIER\" and certificate leaf = H\"$identity_sha1\""
 
 swift build --package-path "$ROOT" -c release
 
@@ -30,5 +55,5 @@ cp "$ROOT/marketplace/.agents/plugins/marketplace.json" \
   "$ROOT/dist/marketplace/.agents/plugins/marketplace.json"
 
 test -s "$APP/Contents/Resources/AppIcon.icns"
-codesign --force --deep --sign - "$APP"
-codesign --verify --deep --strict "$APP"
+"$CODESIGN" --force --timestamp=none --sign "$identity_sha1" --keychain "$LOGIN_KEYCHAIN" --requirements "=$DESIGNATED_REQUIREMENT" "$APP"
+"$CODESIGN" --verify --deep --strict --test-requirement "=$DESIGNATED_REQUIREMENT" "$APP"
