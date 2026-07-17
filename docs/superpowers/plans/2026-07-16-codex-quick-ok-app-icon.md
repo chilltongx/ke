@@ -14,8 +14,12 @@
 - Render “可” with PingFang SC Semibold or the semibold system-font fallback; do not use a generative image model.
 - Generate all ten standard macOS iconset PNG names from 16 px through 1024 px.
 - Keep the minimum supported OS at macOS 14.0 and add no third-party dependencies.
-- Preserve installed plugin state, Hook configuration, Accessibility permission, login item, and session data.
+- Preserve installed plugin state, Hook configuration, login item, and session data. The user-selected migration from ad-hoc signing to one persistent local identity requires one explicit Accessibility re-grant, after which updates must retain the same designated requirement.
 - Never delete or rebuild unrelated Dock entries; refresh only Launch Services metadata and the Dock process.
+
+## Post-review signing resolution
+
+The final icon review found that ad-hoc signing made the designated requirement depend on the app's content hash. The user selected option B: create a dedicated persistent identity in the login keychain, constrain trust to the current user's `codeSign` policy, and sign with an explicit requirement pinned to both `com.codexquickok.CodexQuickOK` and the leaf certificate fingerprint. This resolution is implemented in commit `2f114b8`; the one-time Accessibility re-grant is an intentional migration step rather than a preserved permission.
 
 ---
 
