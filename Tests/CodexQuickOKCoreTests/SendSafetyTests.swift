@@ -1,5 +1,4 @@
 import XCTest
-
 @testable import CodexQuickOKCore
 
 final class SendSafetyTests: XCTestCase {
@@ -7,7 +6,6 @@ final class SendSafetyTests: XCTestCase {
         XCTAssertThrowsError(
             try SendSafety.validate(
                 bundleId: "com.apple.TextEdit",
-                sessionMatched: true,
                 composerValue: ""
             )
         ) { error in
@@ -15,23 +13,10 @@ final class SendSafetyTests: XCTestCase {
         }
     }
 
-    func testRejectsSessionMismatch() {
-        XCTAssertThrowsError(
-            try SendSafety.validate(
-                bundleId: "com.openai.codex",
-                sessionMatched: false,
-                composerValue: ""
-            )
-        ) { error in
-            XCTAssertEqual(error as? SendSafetyError, .sessionMismatch)
-        }
-    }
-
     func testRejectsExistingDraft() {
         XCTAssertThrowsError(
             try SendSafety.validate(
                 bundleId: "com.openai.codex",
-                sessionMatched: true,
                 composerValue: "draft"
             )
         ) { error in
@@ -39,13 +24,29 @@ final class SendSafetyTests: XCTestCase {
         }
     }
 
-    func testAcceptsVerifiedCodexSessionWithEmptyComposer() {
+    func testAcceptsEmptyOrWhitespaceOnlyComposer() {
         XCTAssertNoThrow(
             try SendSafety.validate(
                 bundleId: "com.openai.codex",
-                sessionMatched: true,
                 composerValue: ""
             )
+        )
+        XCTAssertNoThrow(
+            try SendSafety.validate(
+                bundleId: "com.openai.codex",
+                composerValue: " \n\t"
+            )
+        )
+    }
+
+    func testProvidesUserFacingFailureMessages() {
+        XCTAssertEqual(
+            SendSafetyError.wrongApplication.errorDescription,
+            "无法确认当前窗口属于 Codex"
+        )
+        XCTAssertEqual(
+            SendSafetyError.existingDraft.errorDescription,
+            "检测到未发送草稿"
         )
     }
 }
