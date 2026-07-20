@@ -25,7 +25,6 @@ final class ManualApprovalController {
     func stop() {
         attemptID &+= 1
         sendTask?.cancel()
-        sendTask = nil
         panel.setSending(false)
         panel.hide()
     }
@@ -38,19 +37,21 @@ final class ManualApprovalController {
         sendTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
+                sendTask = nil
                 if attemptID == currentAttempt {
-                    sendTask = nil
                     panel.setSending(false)
                 }
             }
             do {
                 try await sender.sendOK()
+                guard attemptID == currentAttempt else { return }
                 panel.showSuccess()
             } catch is CancellationError {
                 return
             } catch {
                 let message = (error as? LocalizedError)?.errorDescription
                     ?? "发送失败，请检查 Codex"
+                guard attemptID == currentAttempt else { return }
                 panel.showFailure(message)
             }
         }

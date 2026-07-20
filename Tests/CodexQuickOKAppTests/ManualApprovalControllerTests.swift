@@ -70,6 +70,36 @@ final class ManualApprovalControllerTests: XCTestCase {
         XCTAssertEqual(panel.lastMode, .hidden)
         XCTAssertEqual(panel.sendingValues, [true, false])
     }
+
+    func testStoppedCancellationInsensitiveSendBlocksOverlapAndSuppressesStaleFeedback() async {
+        let panel = RecordingPanel()
+        let sender = CancellationInsensitiveSender()
+        let controller = ManualApprovalController(panel: panel, sender: sender)
+        controller.start()
+        panel.onActivate?()
+        await waitUntil { sender.callCount == 1 }
+
+        controller.stop()
+        controller.show()
+        panel.onActivate?()
+        await Task.yield()
+
+        XCTAssertEqual(sender.callCount, 1)
+
+        sender.finish(call: 0)
+        await waitUntil { sender.finishedCalls == [0] }
+        await Task.yield()
+
+        XCTAssertEqual(panel.successCount, 0)
+        XCTAssertTrue(panel.failures.isEmpty)
+
+        panel.onActivate?()
+        await waitUntil { sender.callCount == 2 }
+        sender.finish(call: 1)
+        await waitUntil { panel.successCount == 1 }
+
+        XCTAssertTrue(panel.failures.isEmpty)
+    }
 }
 
 @MainActor
@@ -128,6 +158,27 @@ final class StubSender: CurrentApprovalSending {
     func finish() {
         continuation?.resume(returning: ())
         continuation = nil
+    }
+}
+
+@MainActor
+final class CancellationInsensitiveSender: CurrentApprovalSending {
+    private var continuations: [CheckedContinuation<Void, Never>?] = []
+    private(set) var callCount = 0
+    private(set) var finishedCalls: [Int] = []
+
+    func sendOK() async throws {
+        let call = callCount
+        callCount += 1
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+        finishedCalls.append(call)
+    }
+
+    func finish(call: Int) {
+        continuations[call]?.resume()
+        continuations[call] = nil
     }
 }
 
