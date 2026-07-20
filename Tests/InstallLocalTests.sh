@@ -25,6 +25,13 @@ expect_no_event() {
   return 0
 }
 
+expect_event_count() {
+  local actual
+  actual="$(grep -Fc -- "$2" "$1" || true)"
+  [[ "$actual" -eq "$3" ]] \
+    || fail "expected $3 occurrences of '$2' in $1, got $actual"
+}
+
 mkdir -p "$SHIM_DIR"
 cat > "$SHIM_DIR/command-shim" <<'SHIM'
 #!/bin/zsh
@@ -78,7 +85,16 @@ case "$name" in
   mkdir) /bin/mkdir "$@" ;;
   mktemp) /usr/bin/mktemp "$@" ;;
   touch) /usr/bin/touch "$@" ;;
-  lsregister|open|killall) ;;
+  open)
+    if [[ "$INSTALL_TEST_SCENARIO" == open_failure ]]; then
+      count=0
+      [[ -f "$INSTALL_TEST_OPEN_COUNT" ]] && count="$(<"$INSTALL_TEST_OPEN_COUNT")"
+      count=$((count + 1))
+      print -r -- "$count" > "$INSTALL_TEST_OPEN_COUNT"
+      (( count == 1 )) && exit 1
+    fi
+    ;;
+  lsregister|killall) ;;
   codex) ;;
   *) exit 64 ;;
 esac
@@ -100,6 +116,7 @@ run_install() {
   print -r -- old > "$dest/old-marker"
   : > "$log"
   : > "$scenario_root/kill-count"
+  : > "$scenario_root/open-count"
 
   set +e
   HOME="$home" \
@@ -126,6 +143,7 @@ run_install() {
   INSTALL_TEST_SOURCE="$source" \
   INSTALL_TEST_OWNED_EXECUTABLE="$dest/Contents/MacOS/CodexQuickOKApp" \
   INSTALL_TEST_KILL_COUNT="$scenario_root/kill-count" \
+  INSTALL_TEST_OPEN_COUNT="$scenario_root/open-count" \
     zsh "$INSTALLER" >"$scenario_root/stdout" 2>"$scenario_root/stderr"
   typeset -g SCENARIO_STATUS=$?
   set -e
@@ -171,6 +189,13 @@ run_install swap_failure
 [[ -f "$SCENARIO_DEST/old-marker" ]] || fail 'swap failure did not restore working install'
 [[ ! -f "$SCENARIO_DEST/new-marker" ]] || fail 'swap failure left staged app at destination'
 
+run_install open_failure
+[[ "$SCENARIO_STATUS" -ne 0 ]] || fail 'open failure must fail install'
+[[ -f "$SCENARIO_DEST/old-marker" ]] || fail 'open failure did not restore working install'
+[[ ! -f "$SCENARIO_DEST/new-marker" ]] || fail 'open failure kept replacement app'
+expect_event_count "$SCENARIO_LOG" "lsregister:-f $SCENARIO_DEST" 2
+expect_event_count "$SCENARIO_LOG" "open:$SCENARIO_DEST" 2
+
 run_uninstall() {
   local scenario="$1"
   local scenario_root="$TMP_ROOT/uninstall-$scenario"
@@ -190,6 +215,7 @@ run_uninstall() {
   INSTALL_TEST_SOURCE='' \
   INSTALL_TEST_OWNED_EXECUTABLE='' \
   INSTALL_TEST_KILL_COUNT="$scenario_root/kill-count" \
+  INSTALL_TEST_OPEN_COUNT="$scenario_root/open-count" \
     zsh "$UNINSTALLER" >"$scenario_root/stdout" 2>"$scenario_root/stderr"
   typeset -g UNINSTALL_STATUS=$?
   set -e

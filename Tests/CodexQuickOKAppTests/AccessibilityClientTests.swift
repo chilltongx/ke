@@ -12,7 +12,7 @@ final class AccessibilityClientTests: XCTestCase {
             summary(parent: 0, role: "AXTextField", valueSettable: true),
             summary(parent: 0, role: "AXGroup", subrole: "AXLandmarkMain"),
             summary(parent: 2, role: "AXTextArea", value: "", valueSettable: true),
-            summary(parent: 2, role: "AXButton", title: "Send"),
+            summary(parent: 2, role: "AXButton", title: "Send", enabled: false),
         ]
 
         XCTAssertEqual(
@@ -195,6 +195,66 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertEqual(system.pressCount, 0)
     }
 
+    func testDisabledSendBecomesEnabledAfterExactComposerWrite() async throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 72)
+        system.setSendEnabled(false)
+        system.sendEnabledAfterSleeps = [false, true]
+        let client = AccessibilityClient(system: system, pollInterval: 0.01)
+
+        try await client.prepareFocusedConversation(timeout: 0.05)
+        try client.setComposerValue("可")
+        try await client.waitUntilSendEnabled(timeout: 0.03)
+        try client.pressSend()
+
+        XCTAssertEqual(system.writtenValues, ["可"])
+        XCTAssertEqual(system.sleepCount, 2)
+        XCTAssertEqual(system.pressCount, 1)
+    }
+
+    func testNeverEnabledSendTimesOutWithoutPressing() async throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 73)
+        system.setSendEnabled(false)
+        let client = AccessibilityClient(system: system, pollInterval: 0.01)
+
+        try await client.prepareFocusedConversation(timeout: 0.05)
+        try client.setComposerValue("可")
+        do {
+            try await client.waitUntilSendEnabled(timeout: 0.02)
+            XCTFail("Expected send enable timeout")
+        } catch {
+            XCTAssertEqual(error as? AccessibilityClient.AXError, .sendActionTimedOut)
+        }
+
+        XCTAssertLessThanOrEqual(system.sleepCount, 2)
+        XCTAssertEqual(system.pressCount, 0)
+    }
+
+    func testSamePIDFocusedWindowSwitchFailsEveryCachedControlOperation() async throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 74)
+        let client = AccessibilityClient(system: system, pollInterval: 0.01)
+        try await client.prepareFocusedConversation(timeout: 0.05)
+
+        system.focusedWindowNode = system.alternateWindow
+
+        XCTAssertThrowsError(try client.composerValue()) { error in
+            XCTAssertEqual(error as? AccessibilityClient.AXError, .targetApplicationChanged)
+        }
+        XCTAssertThrowsError(try client.setComposerValue("可")) { error in
+            XCTAssertEqual(error as? AccessibilityClient.AXError, .targetApplicationChanged)
+        }
+        do {
+            try await client.waitUntilSendEnabled(timeout: 0.01)
+            XCTFail("Expected focused-window revalidation failure")
+        } catch {
+            XCTAssertEqual(error as? AccessibilityClient.AXError, .targetApplicationChanged)
+        }
+        XCTAssertThrowsError(try client.pressSend()) { error in
+            XCTAssertEqual(error as? AccessibilityClient.AXError, .targetApplicationChanged)
+        }
+        XCTAssertEqual(system.writtenValues, [])
+        XCTAssertEqual(system.pressCount, 0)
+    }
+
     private func assertPrepareFails(
         _ client: AccessibilityClient,
         timeout: TimeInterval = 0.1,
@@ -216,6 +276,7 @@ final class AccessibilityClientTests: XCTestCase {
         subrole: String? = nil,
         title: String? = nil,
         value: String? = nil,
+        enabled: Bool = true,
         valueSettable: Bool = false
     ) -> AccessibilityClient.ElementSummary {
         .init(
@@ -225,7 +286,7 @@ final class AccessibilityClientTests: XCTestCase {
             title: title,
             description: nil,
             value: value,
-            enabled: true,
+            enabled: enabled,
             valueSettable: valueSettable
         )
     }
@@ -240,6 +301,7 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
     var frontmostPID: pid_t?
     var frontmostBundleIdentifier: String? = "com.openai.codex"
     var frontmostPIDsAfterSleeps: [pid_t?] = []
+    var sendEnabledAfterSleeps: [Bool] = []
     var activationSucceeds = true
     private(set) var activationRequests: [pid_t] = []
     private(set) var focusedWindowPIDs: [pid_t] = []
@@ -248,9 +310,11 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
     private(set) var pressCount = 0
 
     let root = Node()
+    let alternateWindow = Node()
     let main = Node()
     let composer = Node()
     let sendButton = Node()
+    var focusedWindowNode: Node?
     var childrenErrorNode: Node?
     var summaryErrorNode: Node?
     private var childrenByNode: [ObjectIdentifier: [Node]] = [:]
@@ -259,6 +323,7 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
     init(pid: pid_t?) {
         runningPIDs = pid.map { [$0] } ?? []
         frontmostPID = pid
+        focusedWindowNode = root
     }
 
     static func validConversation(pid: pid_t) -> FakeAccessibilitySystem {
@@ -305,7 +370,11 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
 
     func focusedWindow(processIdentifier: pid_t) throws -> AnyObject {
         focusedWindowPIDs.append(processIdentifier)
-        return root
+        return focusedWindowNode ?? root
+    }
+
+    func elementsAreEqual(_ lhs: AnyObject, _ rhs: AnyObject) -> Bool {
+        lhs === rhs
     }
 
     func children(of element: AnyObject) throws -> [AnyObject] {
@@ -354,6 +423,17 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
         if !frontmostPIDsAfterSleeps.isEmpty {
             frontmostPID = frontmostPIDsAfterSleeps.removeFirst()
         }
+        if !sendEnabledAfterSleeps.isEmpty {
+            setSendEnabled(sendEnabledAfterSleeps.removeFirst())
+        }
+    }
+
+    func setSendEnabled(_ enabled: Bool) {
+        summariesByNode[ObjectIdentifier(sendButton)] = makeSummary(
+            role: "AXButton",
+            title: "Send",
+            enabled: enabled
+        )
     }
 
     private func makeSummary(
@@ -361,6 +441,7 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
         subrole: String? = nil,
         title: String? = nil,
         value: String? = nil,
+        enabled: Bool = true,
         valueSettable: Bool = false
     ) -> AccessibilityClient.ElementSummary {
         .init(
@@ -369,7 +450,7 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
             title: title,
             description: nil,
             value: value,
-            enabled: true,
+            enabled: enabled,
             valueSettable: valueSettable
         )
     }

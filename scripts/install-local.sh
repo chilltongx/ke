@@ -33,15 +33,22 @@ HAD_EXISTING=false
 DEST_REPLACED=false
 INSTALL_COMMITTED=false
 
-cleanup() {
-  if [[ "$INSTALL_COMMITTED" != true && "$DEST_REPLACED" == true ]]; then
-    "$RM" -rf "$DEST_APP"
+rollback_destination() {
+  if [[ "$DEST_REPLACED" == true ]]; then
+    "$RM" -rf "$DEST_APP" || return 1
     if [[ "$HAD_EXISTING" == true && -e "$BACKUP_APP" ]]; then
-      "$MV" "$BACKUP_APP" "$DEST_APP" || true
+      "$MV" "$BACKUP_APP" "$DEST_APP" || return 1
     fi
-  elif [[ "$INSTALL_COMMITTED" != true && "$HAD_EXISTING" == true \
+    DEST_REPLACED=false
+  elif [[ "$HAD_EXISTING" == true \
       && -e "$BACKUP_APP" && ! -e "$DEST_APP" ]]; then
-    "$MV" "$BACKUP_APP" "$DEST_APP" || true
+    "$MV" "$BACKUP_APP" "$DEST_APP" || return 1
+  fi
+}
+
+cleanup() {
+  if [[ "$INSTALL_COMMITTED" != true ]]; then
+    rollback_destination || true
   fi
   [[ -z "$STAGING_ROOT" || ! -d "$STAGING_ROOT" ]] || "$RM" -rf "$STAGING_ROOT"
 }
@@ -144,10 +151,22 @@ DEST_REPLACED=true
 verify_app "$DEST_APP"
 "$LSREGISTER" -f "$DEST_APP"
 "$TOUCH" "$DEST_APP"
+"$KILLALL" Dock || true
+if ! "$OPEN" "$DEST_APP"; then
+  print -u2 -- 'Unable to open the replacement app; restoring the previous install.'
+  if ! rollback_destination; then
+    print -u2 -- 'Unable to restore the previous install after launch failure.'
+    exit 74
+  fi
+  if [[ "$HAD_EXISTING" == true ]]; then
+    "$LSREGISTER" -f "$DEST_APP" || true
+    "$TOUCH" "$DEST_APP" || true
+    "$OPEN" "$DEST_APP" || true
+  fi
+  exit 76
+fi
+
 INSTALL_COMMITTED=true
 [[ "$HAD_EXISTING" != true ]] || "$RM" -rf "$BACKUP_APP"
-
-"$KILLALL" Dock || true
-"$OPEN" "$DEST_APP"
 print '请在系统设置中仅授予“Codex 可”辅助功能权限。'
 print '以后点击 Dock 图标即可手动启动；右键退出后不会自动重启。'

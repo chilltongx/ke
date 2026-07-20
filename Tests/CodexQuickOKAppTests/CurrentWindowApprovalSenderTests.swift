@@ -25,6 +25,7 @@ final class CurrentWindowApprovalSenderTests: XCTestCase {
         XCTAssertEqual(automation.activationCount, 1)
         XCTAssertEqual(automation.revalidationCount, 2)
         XCTAssertEqual(automation.writtenValues, ["可"])
+        XCTAssertEqual(automation.sendEnableWaitTimeouts, [1.5])
         XCTAssertEqual(automation.sendCount, 1)
     }
 
@@ -176,6 +177,7 @@ private final class FakeAccessibilityController: AccessibilityControlling {
     func revalidateFocusedConversation() throws {}
     func composerValue() throws -> String { "" }
     func setComposerValue(_ value: String) throws {}
+    func waitUntilSendEnabled(timeout: TimeInterval) async throws {}
     func pressSend() throws {}
 }
 
@@ -197,6 +199,7 @@ private final class FakeCurrentCodexAutomation: CurrentCodexAutomating {
     private(set) var activationCount = 0
     private(set) var revalidationCount = 0
     private(set) var writtenValues: [String] = []
+    private(set) var sendEnableWaitTimeouts: [TimeInterval] = []
     private(set) var sendAttempts = 0
     private(set) var sendCount = 0
 
@@ -227,6 +230,10 @@ private final class FakeCurrentCodexAutomation: CurrentCodexAutomating {
     func setComposerValue(_ value: String) throws {
         writtenValues.append(value)
         self.value = value
+    }
+
+    func waitUntilSendEnabled(timeout: TimeInterval) async throws {
+        sendEnableWaitTimeouts.append(timeout)
     }
 
     func performSend() throws {

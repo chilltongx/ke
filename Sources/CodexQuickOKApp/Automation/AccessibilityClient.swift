@@ -9,6 +9,7 @@ protocol AccessibilityControlling: AnyObject {
     func frontmostBundleIdentifier() -> String?
     func composerValue() throws -> String
     func setComposerValue(_ value: String) throws
+    func waitUntilSendEnabled(timeout: TimeInterval) async throws
     func pressSend() throws
 }
 
@@ -23,6 +24,7 @@ protocol AccessibilitySystemProviding: AnyObject {
     ) -> [AccessibilityClient.RunningApplication]
     func activate(processIdentifier: pid_t) -> Bool
     func focusedWindow(processIdentifier: pid_t) throws -> AnyObject
+    func elementsAreEqual(_ lhs: AnyObject, _ rhs: AnyObject) -> Bool
     func children(of element: AnyObject) throws -> [AnyObject]
     func summary(
         of element: AnyObject,
@@ -48,6 +50,7 @@ final class AccessibilityClient: AccessibilityControlling {
         case composerValueUnreadable
         case nativeApprovalCard
         case sendActionMissing
+        case sendActionTimedOut
         case invalidAccessibilityTree
         case accessibilityTreeTruncated
 
@@ -75,6 +78,8 @@ final class AccessibilityClient: AccessibilityControlling {
                 "不支持此类原生审批"
             case .sendActionMissing:
                 "找不到 Codex 发送按钮"
+            case .sendActionTimedOut:
+                "Codex 发送按钮未能及时启用"
             case .invalidAccessibilityTree, .accessibilityTreeTruncated:
                 "无法安全读取完整的 Codex 界面"
             }
@@ -133,6 +138,7 @@ final class AccessibilityClient: AccessibilityControlling {
     private let system: any AccessibilitySystemProviding
     private let pollInterval: TimeInterval
     private var targetPID: pid_t?
+    private var targetWindow: AnyObject?
     private var composer: AnyObject?
     private var sendButton: AnyObject?
 
@@ -150,6 +156,7 @@ final class AccessibilityClient: AccessibilityControlling {
 
     func prepareFocusedConversation(timeout: TimeInterval) async throws {
         targetPID = nil
+        targetWindow = nil
         composer = nil
         sendButton = nil
 
@@ -187,6 +194,13 @@ final class AccessibilityClient: AccessibilityControlling {
         else {
             throw AXError.targetApplicationChanged
         }
+        guard let targetWindow else {
+            throw AXError.taskNotFound
+        }
+        let currentWindow = try system.focusedWindow(processIdentifier: targetPID)
+        guard system.elementsAreEqual(currentWindow, targetWindow) else {
+            throw AXError.targetApplicationChanged
+        }
     }
 
     func frontmostBundleIdentifier() -> String? {
@@ -207,6 +221,24 @@ final class AccessibilityClient: AccessibilityControlling {
             throw AXError.composerMissing
         }
         try system.setComposerValue(value, on: composer)
+    }
+
+    func waitUntilSendEnabled(timeout: TimeInterval) async throws {
+        guard let sendButton else {
+            throw AXError.sendActionMissing
+        }
+        let maximumSleeps = max(0, Int(ceil(max(0, timeout) / pollInterval)))
+        for attempt in 0...maximumSleeps {
+            try revalidateFocusedConversation()
+            let summary = try system.summary(of: sendButton, parentIndex: nil)
+            guard Self.isSendButton(summary) else {
+                throw AXError.sendActionMissing
+            }
+            if summary.enabled { return }
+            guard attempt < maximumSleeps else { break }
+            try await system.sleep(for: pollInterval)
+        }
+        throw AXError.sendActionTimedOut
     }
 
     func pressSend() throws {
@@ -278,15 +310,7 @@ final class AccessibilityClient: AccessibilityControlling {
         }
 
         let sendButtonIndices = elements.indices.filter { index in
-            let element = elements[index]
-            guard element.role == kAXButtonRole as String, element.enabled else {
-                return false
-            }
-            let labels = [element.title, element.description]
-                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            return labels.contains(where: {
-                ["send", "send message", "发送", "发送消息"].contains($0)
-            })
+            Self.isSendButton(elements[index])
         }
         guard sendButtonIndices.count == 1 else {
             throw AXError.sendActionMissing
@@ -369,6 +393,7 @@ final class AccessibilityClient: AccessibilityControlling {
                     in: tree.summaries
                 )
                 targetPID = pid
+                targetWindow = tree.elements[0]
                 composer = tree.elements[selection.composerIndex]
                 sendButton = tree.elements[selection.sendButtonIndex]
                 return
@@ -463,6 +488,15 @@ final class AccessibilityClient: AccessibilityControlling {
         }
     }
 
+    private static func isSendButton(_ element: ElementSummary) -> Bool {
+        guard element.role == kAXButtonRole as String else { return false }
+        let labels = [element.title, element.description]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        return labels.contains(where: {
+            ["send", "send message", "发送", "发送消息"].contains($0)
+        })
+    }
+
     private static func hasValidHierarchy(_ elements: [ElementSummary]) -> Bool {
         for index in elements.indices {
             guard let parent = elements[index].parentIndex else { continue }
@@ -531,6 +565,10 @@ private final class SystemAccessibilityProvider: AccessibilitySystemProviding {
             throw AccessibilityClient.AXError.taskNotFound
         }
         return value as AnyObject
+    }
+
+    func elementsAreEqual(_ lhs: AnyObject, _ rhs: AnyObject) -> Bool {
+        CFEqual(axElement(lhs), axElement(rhs))
     }
 
     func children(of element: AnyObject) throws -> [AnyObject] {

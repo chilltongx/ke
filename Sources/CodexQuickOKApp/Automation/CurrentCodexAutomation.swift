@@ -7,6 +7,7 @@ protocol CurrentCodexAutomating: AnyObject {
     func frontmostBundleIdentifier() -> String?
     func composerValue() throws -> String
     func setComposerValue(_ value: String) throws
+    func waitUntilSendEnabled(timeout: TimeInterval) async throws
     func performSend() throws
 }
 
@@ -36,6 +37,10 @@ final class CurrentCodexAutomation: CurrentCodexAutomating {
 
     func setComposerValue(_ value: String) throws {
         try accessibility.setComposerValue(value)
+    }
+
+    func waitUntilSendEnabled(timeout: TimeInterval) async throws {
+        try await accessibility.waitUntilSendEnabled(timeout: timeout)
     }
 
     func performSend() throws {
