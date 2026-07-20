@@ -76,6 +76,8 @@ final class FakeAccessibilityController: AccessibilityControlling {
     private(set) var activationCount = 0
     private(set) var openedSessionIds: [String] = []
     private(set) var waitedTasks: [(title: String, cwd: String, timeout: TimeInterval)] = []
+    var focusError: Error?
+    private(set) var focusedConversationTimeouts: [TimeInterval] = []
     private(set) var writtenValues: [String] = []
     private(set) var sendCount = 0
 
@@ -93,6 +95,11 @@ final class FakeAccessibilityController: AccessibilityControlling {
 
     func currentTaskMatches(title: String, cwd: String) throws -> Bool {
         currentTaskMatched
+    }
+
+    func waitForFocusedConversation(timeout: TimeInterval) async throws {
+        focusedConversationTimeouts.append(timeout)
+        if let focusError { throw focusError }
     }
 
     func frontmostBundleIdentifier() -> String? {
