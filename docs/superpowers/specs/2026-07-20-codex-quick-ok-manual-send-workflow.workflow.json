@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Codex 可：手动发送流程",
+    "subtitle": "只操作最近使用的 Codex 窗口；任何不确定状态都安全失败",
+    "output": "docs/superpowers/specs/2026-07-20-codex-quick-ok-manual-send-workflow.html"
+  },
+  "lanes": [
+    { "id": "user", "label": "用户" },
+    { "id": "helper", "label": "Codex 可" },
+    { "id": "accessibility", "label": "Accessibility 窗口定位" },
+    { "id": "safety", "label": "安全发送" },
+    { "id": "codex", "label": "Codex 当前窗口" },
+    { "id": "exceptions", "label": "安全失败", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "launch", "label": "手动启动", "fromCol": 0, "toCol": 1 },
+    { "id": "verify", "label": "定位与校验", "fromCol": 2, "toCol": 4, "variant": "security" },
+    { "id": "send", "label": "单次发送", "fromCol": 5, "toCol": 5, "variant": "emphasis" }
+  ],
+  "mainPath": ["dock", "panel", "focus", "inspect", "gate", "press", "received"],
+  "nodes": [
+    { "id": "dock", "lane": "user", "col": 0, "type": "external", "label": "点击 Dock", "sublabel": "主动启动" },
+    { "id": "panel", "lane": "helper", "col": 1, "type": "frontend", "label": "显示“可”按钮", "sublabel": "保持可见", "width": 104 },
+    { "id": "focus", "lane": "accessibility", "col": 2, "type": "backend", "label": "激活 Codex", "sublabel": "最近使用窗口", "width": 86 },
+    { "id": "inspect", "lane": "accessibility", "col": 3, "type": "backend", "label": "读取输入框", "sublabel": "focused window", "width": 68 },
+    { "id": "gate", "lane": "safety", "col": 4, "type": "security", "label": "安全校验", "sublabel": "空草稿", "width": 62 },
+    { "id": "press", "lane": "safety", "col": 5, "type": "messagebus", "label": "输入并发送", "sublabel": "仅一次", "width": 76 },
+    { "id": "received", "lane": "codex", "col": 5, "type": "frontend", "label": "收到“可”", "sublabel": "当前任务", "width": 76 },
+    { "id": "reject", "lane": "exceptions", "col": 4, "type": "security", "label": "拒绝发送", "sublabel": "不猜测目标", "width": 76 },
+    { "id": "feedback", "lane": "exceptions", "col": 5, "type": "external", "label": "红色反馈", "sublabel": "说明原因", "width": 76 }
+  ],
+  "edges": [
+    { "from": "dock", "to": "panel", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop" },
+    { "from": "panel", "to": "focus", "label": "点击“可”", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop" },
+    { "from": "focus", "to": "inspect", "variant": "default" },
+    { "from": "inspect", "to": "gate", "variant": "security", "fromSide": "bottom", "toSide": "top", "route": "drop" },
+    { "from": "gate", "to": "press", "variant": "emphasis" },
+    { "from": "press", "to": "received", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop" },
+    { "from": "gate", "to": "reject", "label": "任一条件失败", "variant": "security", "role": "error", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 1, "labelDy": 10 },
+    { "from": "reject", "to": "feedback", "variant": "security", "role": "error" }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "安全门",
+      "items": [
+        "前台 Bundle ID 必须是 com.openai.codex",
+        "focused window、输入框与发送按钮必须唯一",
+        "输入框必须为空，且不能存在原生审批卡片",
+        "失败后不输入、不发送、不自动重试"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "明确移除",
+      "items": [
+        "不依赖 Hook 会话状态",
+        "不使用 session_id 或 codex:// 跳转任务",
+        "不模拟全局键盘，不操作系统剪贴板",
+        "不以周额度决定按钮可见性"
+      ]
+    }
+  ]
+}
