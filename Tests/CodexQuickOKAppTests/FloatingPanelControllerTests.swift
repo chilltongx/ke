@@ -56,7 +56,7 @@ final class FloatingPanelControllerTests: XCTestCase {
 
         XCTAssertEqual(controller.button.feedbackState, .success)
         XCTAssertNil(controller.button.layer?.animation(forKey: "success"))
-        XCTAssertEqual(announcer.messages, ["批准成功"])
+        XCTAssertEqual(announcer.messages, ["已发送可"])
         XCTAssertEqual(scheduler.delay, 0.28, accuracy: 0.001)
 
         scheduler.fire()
@@ -130,6 +130,20 @@ final class FloatingPanelControllerTests: XCTestCase {
         XCTAssertEqual(controller.button.toolTip, quotaTooltip)
         XCTAssertEqual(scheduler.delay, 0.28, accuracy: 0.001)
 
+        controller.hide()
+    }
+
+    func testHideMenuExplainsDockRecovery() {
+        let controller = FloatingPanelController(
+            positionStore: PanelPositionStore(
+                defaults: UserDefaults(suiteName: #function)!
+            )
+        )
+        XCTAssertTrue(
+            controller.button.menu?.items.contains {
+                $0.title == "隐藏按钮（点 Dock 恢复）"
+            } == true
+        )
         controller.hide()
     }
 }

@@ -447,6 +447,7 @@ final class AppControllerTests: XCTestCase {
 private final class FakePanel: CompanionPanel {
     var onActivate: (() -> Void)?
     var onTemporaryHide: (() -> Void)?
+    var onRefreshQuota: (() -> Void)?
     var lastMode: CompanionMode = .hidden
     var failures: [String] = []
     var successCount = 0

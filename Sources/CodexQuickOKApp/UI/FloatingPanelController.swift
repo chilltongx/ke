@@ -57,6 +57,7 @@ final class SystemAccessibilityAnnouncer: AccessibilityAnnouncing {
 protocol CompanionPanel: AnyObject {
     var onActivate: (() -> Void)? { get set }
     var onTemporaryHide: (() -> Void)? { get set }
+    var onRefreshQuota: (() -> Void)? { get set }
 
     func show(mode: CompanionMode)
     func hide()
@@ -155,7 +156,7 @@ final class FloatingPanelController: NSObject, CompanionPanel {
             keyEquivalent: ""
         )
         menu.addItem(
-            withTitle: "暂时隐藏",
+            withTitle: "隐藏按钮（点 Dock 恢复）",
             action: #selector(hideTemporarily),
             keyEquivalent: ""
         )
@@ -211,7 +212,7 @@ final class FloatingPanelController: NSObject, CompanionPanel {
 
     func showSuccess() {
         button.showSuccessFeedback()
-        accessibilityAnnouncer.announce("批准成功", for: button)
+        accessibilityAnnouncer.announce("已发送可", for: button)
         let animation = CAKeyframeAnimation(keyPath: "transform.scale")
         animation.values = [1, 1.08, 1]
         animation.duration = 0.28
