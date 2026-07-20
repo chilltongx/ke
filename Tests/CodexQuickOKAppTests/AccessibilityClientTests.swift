@@ -53,6 +53,42 @@ final class AccessibilityClientTests: XCTestCase {
         }
     }
 
+    func testUnreadableOrNonStringComposerValueFailsClosed() {
+        XCTAssertThrowsError(
+            try AccessibilityClient.validatedComposerValue(
+                attributeReadSucceeded: false,
+                value: nil
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .composerValueUnreadable
+            )
+        }
+        XCTAssertThrowsError(
+            try AccessibilityClient.validatedComposerValue(
+                attributeReadSucceeded: true,
+                value: nil
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .composerValueUnreadable
+            )
+        }
+        XCTAssertThrowsError(
+            try AccessibilityClient.validatedComposerValue(
+                attributeReadSucceeded: true,
+                value: NSNumber(value: 0)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .composerValueUnreadable
+            )
+        }
+    }
+
     private func summary(
         parent: Int?,
         role: String,

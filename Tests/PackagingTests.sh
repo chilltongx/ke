@@ -62,8 +62,12 @@ if [[ -f "$ROOT/Resources/Info.plist" ]]; then
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$ROOT/Resources/Info.plist" 2>/dev/null)" == AppIcon ]] || fail 'CFBundleIconFile must be AppIcon'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 3 ]] || fail 'bundle version must be 3'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 14.0 ]] || fail 'unexpected minimum system version'
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$ROOT/Resources/Info.plist" 2>/dev/null)" == true ]] || fail 'LSUIElement must be true'
+  if /usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$ROOT/Resources/Info.plist" >/dev/null 2>&1; then
+    fail 'LSUIElement must be absent so Dock reopen remains reachable'
+  fi
 fi
+
+expect_exact_line Sources/CodexQuickOKApp/AppMain.swift '        app.setActivationPolicy(.regular)'
 
 if [[ -f "$ROOT/Resources/PrivacyInfo.xcprivacy" ]]; then
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :NSPrivacyTracking' "$ROOT/Resources/PrivacyInfo.xcprivacy" 2>/dev/null)" == false ]] || fail 'NSPrivacyTracking must be false'

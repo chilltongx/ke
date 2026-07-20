@@ -23,8 +23,41 @@ final class AppDelegateManualModeTests: XCTestCase {
         XCTAssertEqual(panel.lastMode, .running)
     }
 
+    func testReopenDuringSuspendedSendKeepsSingleInFlightAttempt() async {
+        let panel = RecordingPanel()
+        let sender = StubSender(suspended: true)
+        let delegate = makeDelegate()
+        delegate.configureManualRuntime(panel: panel, sender: sender)
+        panel.onActivate?()
+        await waitUntil { sender.callCount == 1 }
+
+        panel.hide()
+        _ = delegate.applicationShouldHandleReopen(
+            NSApplication.shared,
+            hasVisibleWindows: false
+        )
+        panel.onActivate?()
+        await Task.yield()
+
+        XCTAssertEqual(panel.lastMode, .running)
+        XCTAssertEqual(sender.callCount, 1)
+
+        sender.finish()
+        await waitUntil { panel.successCount == 1 }
+    }
+
     func testRemovesEnabledLegacyLoginItem() async {
         let loginItem = FakeLoginItemManager(status: .enabled)
+        let delegate = makeDelegate(loginItemManager: loginItem)
+
+        delegate.removeLegacyLoginItemIfNeeded()
+        await waitUntil { loginItem.unregisterCount == 1 }
+
+        XCTAssertEqual(loginItem.unregisterCount, 1)
+    }
+
+    func testRemovesLegacyLoginItemRequiringApproval() async {
+        let loginItem = FakeLoginItemManager(status: .requiresApproval)
         let delegate = makeDelegate(loginItemManager: loginItem)
 
         delegate.removeLegacyLoginItemIfNeeded()
@@ -41,6 +74,40 @@ final class AppDelegateManualModeTests: XCTestCase {
         await Task.yield()
 
         XCTAssertEqual(loginItem.unregisterCount, 0)
+    }
+
+    func testDoesNothingWhenLegacyLoginItemIsNotFound() async {
+        let loginItem = FakeLoginItemManager(status: .notFound)
+        let delegate = makeDelegate(loginItemManager: loginItem)
+
+        delegate.removeLegacyLoginItemIfNeeded()
+        await Task.yield()
+
+        XCTAssertEqual(loginItem.unregisterCount, 0)
+    }
+
+    func testTerminationWaitsForLegacyLoginItemRemoval() async {
+        let loginItem = FakeLoginItemManager(status: .enabled, suspended: true)
+        var replies: [Bool] = []
+        let appServer = ControlledAppServer()
+        let delegate = AppDelegate(
+            appServer: appServer,
+            codexBinaryProvider: { URL(fileURLWithPath: "/tmp/codex") },
+            terminationReply: { replies.append($0) },
+            loginItemManager: loginItem
+        )
+        delegate.removeLegacyLoginItemIfNeeded()
+        await waitUntil { loginItem.unregisterCount == 1 }
+
+        let termination = delegate.applicationShouldTerminate(NSApplication.shared)
+        await waitUntil { await appServer.stopCount == 2 }
+        await spinMainActor()
+
+        XCTAssertEqual(termination, .terminateLater)
+        XCTAssertTrue(replies.isEmpty)
+
+        loginItem.finishUnregister()
+        await waitUntil { replies == [true] }
     }
 
     private func makeDelegate(
@@ -134,14 +201,24 @@ final class AppDelegateConfigurationTests: XCTestCase {
 @MainActor
 private final class FakeLoginItemManager: LegacyLoginItemManaging {
     let status: SMAppService.Status
+    private let suspended: Bool
+    private var continuation: CheckedContinuation<Void, Never>?
     private(set) var unregisterCount = 0
 
-    init(status: SMAppService.Status) {
+    init(status: SMAppService.Status, suspended: Bool = false) {
         self.status = status
+        self.suspended = suspended
     }
 
     func unregister() async throws {
         unregisterCount += 1
+        guard suspended else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func finishUnregister() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

@@ -59,6 +59,36 @@ final class CurrentWindowApprovalSenderTests: XCTestCase {
         XCTAssertEqual(automation.sendAttempts, 1)
     }
 
+    func testActivationFailureNeverWritesOrSends() async {
+        let automation = FakeCurrentCodexAutomation(
+            bundleId: "com.openai.codex",
+            value: ""
+        )
+        automation.activationError = FakeCurrentCodexAutomation.FakeError.activationFailed
+
+        await assertRejectedWithoutWriting(automation)
+    }
+
+    func testComposerFailureNeverWritesOrSends() async {
+        let automation = FakeCurrentCodexAutomation(
+            bundleId: "com.openai.codex",
+            value: ""
+        )
+        automation.composerError = FakeCurrentCodexAutomation.FakeError.composerUnavailable
+
+        await assertRejectedWithoutWriting(automation)
+    }
+
+    func testUnreadableAXComposerNeverWritesOrSends() async {
+        let automation = FakeCurrentCodexAutomation(
+            bundleId: "com.openai.codex",
+            value: ""
+        )
+        automation.composerError = AccessibilityClient.AXError.composerValueUnreadable
+
+        await assertRejectedWithoutWriting(automation)
+    }
+
     private func assertRejectedWithoutWriting(
         _ automation: FakeCurrentCodexAutomation
     ) async {
@@ -122,11 +152,17 @@ private final class FakeAccessibilityController: AccessibilityControlling {
 
 @MainActor
 private final class FakeCurrentCodexAutomation: CurrentCodexAutomating {
-    enum FakeError: Error { case sendUnavailable }
+    enum FakeError: Error {
+        case activationFailed
+        case composerUnavailable
+        case sendUnavailable
+    }
 
     var bundleId: String?
     var value: String
     var activationGate: (() async throws -> Void)?
+    var activationError: Error?
+    var composerError: Error?
     var sendError: Error?
     private(set) var activationCount = 0
     private(set) var writtenValues: [String] = []
@@ -141,10 +177,14 @@ private final class FakeCurrentCodexAutomation: CurrentCodexAutomating {
     func activateCurrentWindow() async throws {
         activationCount += 1
         try await activationGate?()
+        if let activationError { throw activationError }
     }
 
     func frontmostBundleIdentifier() -> String? { bundleId }
-    func composerValue() throws -> String { value }
+    func composerValue() throws -> String {
+        if let composerError { throw composerError }
+        return value
+    }
 
     func setComposerValue(_ value: String) throws {
         writtenValues.append(value)

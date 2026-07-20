@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var reconnectAttempt = 0
     private var reconnectTask: Task<Void, Never>?
     private var appServerStartTask: Task<Void, Never>?
+    private var loginItemRemovalTask: Task<Void, Never>?
     private var shutdownTask: Task<Void, Never>?
     private var shutdownFinished = false
 
@@ -65,9 +66,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func removeLegacyLoginItemIfNeeded() {
+        guard loginItemRemovalTask == nil else { return }
         switch loginItemManager.status {
         case .enabled, .requiresApproval:
-            Task { [loginItemManager] in try? await loginItemManager.unregister() }
+            loginItemRemovalTask = Task { @MainActor [weak self, loginItemManager] in
+                try? await loginItemManager.unregister()
+                self?.loginItemRemovalTask = nil
+            }
         case .notRegistered, .notFound:
             break
         @unknown default:
@@ -116,11 +121,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller?.stop()
 
         let startTask = appServerStartTask
+        let loginItemRemovalTask = loginItemRemovalTask
         startTask?.cancel()
         shutdownTask = Task { @MainActor [self] in
             await appServer.stop()
             await startTask?.value
             await appServer.stop()
+            await loginItemRemovalTask?.value
             isAppServerStarted = false
             shutdownFinished = true
             terminationReply(true)
