@@ -31,6 +31,18 @@ expect_absent_text() {
   fi
 }
 
+expect_line_before() {
+  local file="$1"
+  local first="$2"
+  local second="$3"
+  local first_line second_line
+  first_line="$(grep -nFx -- "$first" "$ROOT/$file" | head -n 1 | cut -d: -f1 || true)"
+  second_line="$(grep -nFx -- "$second" "$ROOT/$file" | head -n 1 | cut -d: -f1 || true)"
+  if [[ -z "$first_line" || -z "$second_line" || "$first_line" -ge "$second_line" ]]; then
+    fail "$file must place '$first' before '$second'"
+  fi
+}
+
 for file in \
   Resources/Info.plist \
   Resources/PrivacyInfo.xcprivacy \
@@ -88,9 +100,26 @@ fi
 
 if [[ -f "$ROOT/scripts/install-local.sh" ]]; then
   expect_exact_line scripts/install-local.sh 'DEST_APP="$HOME/Applications/Codex 可.app"'
+  expect_exact_line scripts/install-local.sh 'APP_PROCESS="CodexQuickOKApp"'
+  expect_exact_line scripts/install-local.sh 'STOP_ATTEMPTS=50'
+  expect_exact_line scripts/install-local.sh '  killall "$APP_PROCESS"'
+  expect_exact_line scripts/install-local.sh '  for (( attempt = 0; attempt < STOP_ATTEMPTS; attempt++ )); do'
+  expect_exact_line scripts/install-local.sh '    pgrep -x "$APP_PROCESS" >/dev/null || return 0'
+  expect_exact_line scripts/install-local.sh '    sleep 0.1'
+  expect_exact_line scripts/install-local.sh '  print -u2 -- "Codex 可未能在 5 秒内退出；安装已中止。"'
+  expect_exact_line scripts/install-local.sh '  return 75'
+  expect_exact_line scripts/install-local.sh 'stop_running_app'
   expect_exact_line scripts/install-local.sh '"$LSREGISTER" -f "$DEST_APP"'
   expect_exact_line scripts/install-local.sh 'touch "$DEST_APP"'
   expect_exact_line scripts/install-local.sh 'killall Dock || true'
+  expect_absent_text scripts/install-local.sh 'killall "\$APP_PROCESS".*\|\| true'
+  expect_line_before scripts/install-local.sh '  killall "$APP_PROCESS"' \
+    '  for (( attempt = 0; attempt < STOP_ATTEMPTS; attempt++ )); do'
+  expect_line_before scripts/install-local.sh \
+    '  for (( attempt = 0; attempt < STOP_ATTEMPTS; attempt++ )); do' \
+    '  print -u2 -- "Codex 可未能在 5 秒内退出；安装已中止。"'
+  expect_line_before scripts/install-local.sh 'stop_running_app' 'rm -rf "$DEST_APP"'
+  expect_line_before scripts/install-local.sh 'rm -rf "$DEST_APP"' 'open "$DEST_APP"'
 fi
 
 if [[ -f "$ROOT/scripts/uninstall-local.sh" ]]; then
