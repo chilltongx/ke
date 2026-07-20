@@ -40,20 +40,15 @@ iconutil -c icns "$ICONSET" -o "$ICON_BUILD_DIR/AppIcon.icns"
 
 rm -rf "$ROOT/dist"
 APP="$ROOT/dist/Codex 可.app"
-PLUGIN="$ROOT/dist/marketplace/plugins/codex-quick-ok"
 
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$PLUGIN/bin"
-cp "$ROOT/.build/release/CodexQuickOKApp" "$APP/Contents/MacOS/CodexQuickOKApp"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$ROOT/.build/release/CodexQuickOKApp" \
+  "$APP/Contents/MacOS/CodexQuickOKApp"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
-cp "$ROOT/Resources/PrivacyInfo.xcprivacy" "$APP/Contents/Resources/PrivacyInfo.xcprivacy"
-cp "$ICON_BUILD_DIR/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
-
-cp -R "$ROOT/plugin/codex-quick-ok/." "$PLUGIN/"
-cp "$ROOT/.build/release/CodexQuickOKHook" "$PLUGIN/bin/CodexQuickOKHook"
-
-mkdir -p "$ROOT/dist/marketplace/.agents/plugins"
-cp "$ROOT/marketplace/.agents/plugins/marketplace.json" \
-  "$ROOT/dist/marketplace/.agents/plugins/marketplace.json"
+cp "$ROOT/Resources/PrivacyInfo.xcprivacy" \
+  "$APP/Contents/Resources/PrivacyInfo.xcprivacy"
+cp "$ICON_BUILD_DIR/AppIcon.icns" \
+  "$APP/Contents/Resources/AppIcon.icns"
 
 test -s "$APP/Contents/Resources/AppIcon.icns"
 "$CODESIGN" --force --timestamp=none --sign "$identity_sha1" --keychain "$LOGIN_KEYCHAIN" --requirements "=$DESIGNATED_REQUIREMENT" "$APP"

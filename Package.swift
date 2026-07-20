@@ -7,13 +7,14 @@ let package = Package(
     products: [
         .library(name: "CodexQuickOKCore", targets: ["CodexQuickOKCore"]),
         .executable(name: "CodexQuickOKApp", targets: ["CodexQuickOKApp"]),
-        .executable(name: "CodexQuickOKHook", targets: ["CodexQuickOKHook"]),
     ],
     targets: [
         .target(name: "CodexQuickOKCore"),
-        .executableTarget(name: "CodexQuickOKHook", dependencies: ["CodexQuickOKCore"]),
         .executableTarget(name: "CodexQuickOKApp", dependencies: ["CodexQuickOKCore"]),
         .testTarget(name: "CodexQuickOKCoreTests", dependencies: ["CodexQuickOKCore"]),
-        .testTarget(name: "CodexQuickOKAppTests", dependencies: ["CodexQuickOKApp", "CodexQuickOKCore"]),
+        .testTarget(
+            name: "CodexQuickOKAppTests",
+            dependencies: ["CodexQuickOKApp", "CodexQuickOKCore"]
+        ),
     ]
 )
