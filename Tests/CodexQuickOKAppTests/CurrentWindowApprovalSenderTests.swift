@@ -1,3 +1,4 @@
+import CodexQuickOKCore
 import Foundation
 import XCTest
 
@@ -26,7 +27,68 @@ final class CurrentWindowApprovalSenderTests: XCTestCase {
         XCTAssertEqual(automation.revalidationCount, 2)
         XCTAssertEqual(automation.writtenValues, ["可"])
         XCTAssertEqual(automation.sendEnableWaitTimeouts, [1.5])
+        XCTAssertEqual(automation.composerReadCount, 2)
         XCTAssertEqual(automation.sendCount, 1)
+    }
+
+    func testComposerMutationDuringSendEnableWaitFailsWithoutPressing() async {
+        let automation = FakeCurrentCodexAutomation(
+            bundleId: "com.openai.codex",
+            value: ""
+        )
+        automation.valueAfterSendEnableWait = "可 draft"
+
+        do {
+            try await CurrentWindowApprovalSender(automation: automation).sendOK()
+            XCTFail("Expected final composer safety rejection")
+        } catch {
+            XCTAssertEqual(error as? SendSafetyError, .existingDraft)
+        }
+
+        XCTAssertEqual(automation.writtenValues, ["可"])
+        XCTAssertEqual(automation.composerReadCount, 2)
+        XCTAssertEqual(automation.sendAttempts, 0)
+    }
+
+    func testDelayedComposerWriteMismatchFailsWithoutPressing() async {
+        let automation = FakeCurrentCodexAutomation(
+            bundleId: "com.openai.codex",
+            value: ""
+        )
+        automation.valueAfterWrite = "可 "
+
+        do {
+            try await CurrentWindowApprovalSender(automation: automation).sendOK()
+            XCTFail("Expected exact composer value rejection")
+        } catch {
+            XCTAssertEqual(error as? SendSafetyError, .existingDraft)
+        }
+
+        XCTAssertEqual(automation.writtenValues, ["可"])
+        XCTAssertEqual(automation.sendAttempts, 0)
+    }
+
+    func testFinalUnreadableComposerFailsWithoutPressing() async {
+        let automation = FakeCurrentCodexAutomation(
+            bundleId: "com.openai.codex",
+            value: ""
+        )
+        automation.composerErrorAfterSendEnableWait =
+            AccessibilityClient.AXError.composerValueUnreadable
+
+        do {
+            try await CurrentWindowApprovalSender(automation: automation).sendOK()
+            XCTFail("Expected final composer read failure")
+        } catch {
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .composerValueUnreadable
+            )
+        }
+
+        XCTAssertEqual(automation.writtenValues, ["可"])
+        XCTAssertEqual(automation.composerReadCount, 2)
+        XCTAssertEqual(automation.sendAttempts, 0)
     }
 
     func testRejectsDraftAndWrongFrontmostApplication() async {
@@ -194,10 +256,14 @@ private final class FakeCurrentCodexAutomation: CurrentCodexAutomating {
     var activationGate: (() async throws -> Void)?
     var activationError: Error?
     var composerError: Error?
+    var composerErrorAfterSendEnableWait: Error?
     var sendError: Error?
+    var valueAfterWrite: String?
+    var valueAfterSendEnableWait: String?
     var revalidationErrors: [Error?] = []
     private(set) var activationCount = 0
     private(set) var revalidationCount = 0
+    private(set) var composerReadCount = 0
     private(set) var writtenValues: [String] = []
     private(set) var sendEnableWaitTimeouts: [TimeInterval] = []
     private(set) var sendAttempts = 0
@@ -223,17 +289,24 @@ private final class FakeCurrentCodexAutomation: CurrentCodexAutomating {
         }
     }
     func composerValue() throws -> String {
+        composerReadCount += 1
         if let composerError { throw composerError }
         return value
     }
 
     func setComposerValue(_ value: String) throws {
         writtenValues.append(value)
-        self.value = value
+        self.value = valueAfterWrite ?? value
     }
 
     func waitUntilSendEnabled(timeout: TimeInterval) async throws {
         sendEnableWaitTimeouts.append(timeout)
+        if let valueAfterSendEnableWait {
+            value = valueAfterSendEnableWait
+        }
+        if let composerErrorAfterSendEnableWait {
+            composerError = composerErrorAfterSendEnableWait
+        }
     }
 
     func performSend() throws {

@@ -38,6 +38,9 @@ final class CurrentWindowApprovalSender: CurrentApprovalSending {
         try automation.setComposerValue("可")
         try await automation.waitUntilSendEnabled(timeout: 1.5)
         try automation.revalidateTarget()
+        guard try automation.composerValue() == "可" else {
+            throw SendSafetyError.existingDraft
+        }
         try automation.performSend()
     }
 }
