@@ -5,16 +5,15 @@ import ServiceManagement
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    static let codexBundleIdentifier = CodexProcessMonitor.codexBundleIdentifier
+    static let codexBundleIdentifier = "com.openai.codex"
     static let quotaRefreshInterval: TimeInterval = 300
 
     private let appServer: any CodexAppServerServing
     private let codexBinaryProvider: () throws -> URL
     private let terminationReply: @MainActor (Bool) -> Void
-    private var panel: FloatingPanelController?
-    private var controller: AppController?
-    private var sessionMonitor: SessionDirectoryMonitor?
-    private var processMonitor: CodexProcessMonitor?
+    private let loginItemManager: any LegacyLoginItemManaging
+    private var panel: (any CompanionPanel)?
+    private var controller: ManualApprovalController?
     private var quotaTimer: Timer?
     private(set) var isAppServerStarted = false
     private var reconnectAttempt = 0
@@ -36,12 +35,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     init(
         appServer: any CodexAppServerServing,
         codexBinaryProvider: @escaping () throws -> URL,
-        terminationReply: @escaping @MainActor (Bool) -> Void
+        terminationReply: @escaping @MainActor (Bool) -> Void,
+        loginItemManager: any LegacyLoginItemManaging = MainAppLoginItemManager()
     ) {
         self.appServer = appServer
         self.codexBinaryProvider = codexBinaryProvider
         self.terminationReply = terminationReply
+        self.loginItemManager = loginItemManager
         super.init()
+    }
+
+    func configureManualRuntime(
+        panel: any CompanionPanel,
+        sender: any CurrentApprovalSending
+    ) {
+        let controller = ManualApprovalController(panel: panel, sender: sender)
+        self.panel = panel
+        self.controller = controller
+        panel.onRefreshQuota = { [weak self] in self?.refreshQuota() }
+        controller.start()
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        controller?.show()
+        return true
+    }
+
+    func removeLegacyLoginItemIfNeeded() {
+        switch loginItemManager.status {
+        case .enabled, .requiresApproval:
+            Task { [loginItemManager] in try? await loginItemManager.unregister() }
+        case .notRegistered, .notFound:
+            break
+        @unknown default:
+            break
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -55,55 +86,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         showOnboardingIfNeeded()
         requestAccessibilityIfNeeded()
-        registerLoginItemIfNeeded()
+        removeLegacyLoginItemIfNeeded()
 
-        guard let directory = try? SessionStateStore.defaultDirectory() else {
-            NSApplication.shared.terminate(nil)
-            return
-        }
-
-        let store = SessionStateStore(directory: directory)
         let panel = FloatingPanelController()
-        let automation = SystemCodexAutomation(
-            accessibility: AccessibilityClient(),
-            metadataReader: appServer
-        )
-        let sender = ApprovalSender(automation: automation) { sessionId in
-            let states = (try? await store.loadAll(now: Date(), staleAfter: 43_200)) ?? []
-            return SessionSnapshotEvaluator.evaluate(
-                states: states,
-                codexRunning: true,
-                now: Date()
-            ).targetSessionId == sessionId
-        }
-        let controller = AppController(store: store, panel: panel, sender: sender)
-        let sessionMonitor = SessionDirectoryMonitor(directory: directory)
-        let processMonitor = CodexProcessMonitor()
-
-        self.panel = panel
-        self.controller = controller
-        self.sessionMonitor = sessionMonitor
-        self.processMonitor = processMonitor
-
-        panel.hide()
-        panel.onRefreshQuota = { [weak self] in
-            self?.refreshQuota()
-        }
-        sessionMonitor.onChange = { [weak controller] in
-            Task { @MainActor in
-                await controller?.reload()
-            }
-        }
-        processMonitor.onChange = { [weak controller] running in
-            controller?.processStateChanged(running)
-        }
-
-        do {
-            try sessionMonitor.start()
-        } catch {
-            panel.showFailure("无法监控 Codex 会话状态")
-        }
-        processMonitor.start()
+        let automation = CurrentCodexAutomation(accessibility: AccessibilityClient())
+        let sender = CurrentWindowApprovalSender(automation: automation)
+        configureManualRuntime(panel: panel, sender: sender)
 
         quotaTimer = Timer.scheduledTimer(
             withTimeInterval: Self.quotaRefreshInterval,
@@ -126,8 +114,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quotaTimer?.invalidate()
         reconnectTask?.cancel()
         controller?.stop()
-        sessionMonitor?.stop()
-        processMonitor?.stop()
 
         let startTask = appServerStartTask
         startTask?.cancel()
@@ -147,8 +133,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quotaTimer?.invalidate()
         reconnectTask?.cancel()
         controller?.stop()
-        sessionMonitor?.stop()
-        processMonitor?.stop()
     }
 
     static func reconnectDelay(forAttempt attempt: Int) -> TimeInterval {
@@ -244,7 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "启用 Codex 可"
-        alert.informativeText = "接下来只需授予辅助功能权限，并在 Codex 的 /hooks 页面审查并信任 codex-quick-ok。登录项默认开启；没有活动任务时按钮会自动隐藏。"
+        alert.informativeText = "请授予辅助功能权限。之后从 Dock 手动启动；点击悬浮的“可”按钮，会向最近使用的 Codex 窗口空输入框发送一次“可”。"
         alert.addButton(withTitle: "继续")
         alert.runModal()
         UserDefaults.standard.set(true, forKey: key)
@@ -256,11 +240,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true,
         ] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
-    }
-
-    private func registerLoginItemIfNeeded() {
-        guard SMAppService.mainApp.status == .notRegistered else { return }
-        try? SMAppService.mainApp.register()
     }
 
     private static func installedCodexBinaryURL() throws -> URL {

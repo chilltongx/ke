@@ -5,9 +5,6 @@ import Foundation
 @MainActor
 protocol AccessibilityControlling: AnyObject {
     func activateCodex() throws
-    func openThreadURL(sessionId: String) throws
-    func waitForTask(title: String, cwd: String, timeout: TimeInterval) async throws
-    func currentTaskMatches(title: String, cwd: String) throws -> Bool
     func waitForFocusedConversation(timeout: TimeInterval) async throws
     func frontmostBundleIdentifier() -> String?
     func composerValue() throws -> String
@@ -86,8 +83,6 @@ final class AccessibilityClient: AccessibilityControlling {
     }
 
     private static let codexBundleIdentifier = "com.openai.codex"
-    private static let pathComponentCharacters = CharacterSet.alphanumerics
-        .union(CharacterSet(charactersIn: "-._~"))
 
     private var composer: AXUIElement?
     private var sendButton: AXUIElement?
@@ -107,56 +102,6 @@ final class AccessibilityClient: AccessibilityControlling {
         guard app.activate(options: [.activateIgnoringOtherApps]) else {
             throw AXError.taskNotFound
         }
-    }
-
-    func openThreadURL(sessionId: String) throws {
-        let url = try Self.threadURL(sessionId: sessionId)
-        guard NSWorkspace.shared.open(url) else {
-            throw AXError.taskNotFound
-        }
-    }
-
-    func waitForTask(title: String, cwd: String, timeout: TimeInterval) async throws {
-        composer = nil
-        sendButton = nil
-        let deadline = Date().addingTimeInterval(timeout)
-
-        repeat {
-            do {
-                let tree = try elementTree()
-                let selection = try Self.selectActiveTaskControls(
-                    in: tree.summaries,
-                    title: title,
-                    cwd: cwd
-                )
-                composer = tree.elements[selection.composerIndex]
-                sendButton = tree.elements[selection.sendButtonIndex]
-                return
-            } catch let error as AXError {
-                switch error {
-                case .taskNotFound, .composerMissing, .sendActionMissing:
-                    break
-                case .permissionMissing, .codexNotRunning, .ambiguousTask,
-                     .composerValueUnreadable, .nativeApprovalCard:
-                    throw error
-                }
-            }
-
-            if Date() < deadline {
-                try await Task.sleep(for: .milliseconds(100))
-            }
-        } while Date() < deadline
-
-        throw AXError.taskNotFound
-    }
-
-    func currentTaskMatches(title: String, cwd: String) throws -> Bool {
-        let tree = try elementTree()
-        return try Self.currentTaskMatches(
-            in: tree.summaries,
-            title: title,
-            cwd: cwd
-        )
     }
 
     func waitForFocusedConversation(timeout: TimeInterval) async throws {
@@ -236,18 +181,6 @@ final class AccessibilityClient: AccessibilityControlling {
         }
     }
 
-    static func threadURL(sessionId: String) throws -> URL {
-        guard !sessionId.isEmpty,
-              let encoded = sessionId.addingPercentEncoding(
-                  withAllowedCharacters: pathComponentCharacters
-              ),
-              let url = URL(string: "codex://threads/\(encoded)")
-        else {
-            throw AXError.taskNotFound
-        }
-        return url
-    }
-
     static func selectControls(in elements: [ElementSummary]) throws -> ControlSelection {
         if elements.contains(where: isNativeApprovalControl) {
             throw AXError.nativeApprovalCard
@@ -281,25 +214,6 @@ final class AccessibilityClient: AccessibilityControlling {
             composerIndex: composerIndices[0],
             sendButtonIndex: sendButtonIndices[0]
         )
-    }
-
-    static func currentTaskMatches(
-        in elements: [ElementSummary],
-        title: String,
-        cwd: String
-    ) throws -> Bool {
-        do {
-            _ = try selectActiveTaskControls(in: elements, title: title, cwd: cwd)
-            return true
-        } catch let error as AXError {
-            switch error {
-            case .taskNotFound, .composerMissing, .sendActionMissing:
-                return false
-            case .permissionMissing, .codexNotRunning, .ambiguousTask,
-                 .composerValueUnreadable, .nativeApprovalCard:
-                throw error
-            }
-        }
     }
 
     static func selectFocusedConversationControls(
@@ -356,69 +270,6 @@ final class AccessibilityClient: AccessibilityControlling {
             throw AXError.composerValueUnreadable
         }
         return value
-    }
-
-    private static func selectActiveTaskControls(
-        in elements: [ElementSummary],
-        title: String,
-        cwd: String
-    ) throws -> ControlSelection {
-        guard !elements.isEmpty, hasValidHierarchy(elements) else {
-            throw AXError.ambiguousTask
-        }
-
-        let mainRoots = elements.indices.filter {
-            elements[$0].subrole == kAXLandmarkMainSubrole as String
-        }
-        var controlOwners: [(root: Int, selection: ControlSelection)] = []
-
-        for root in mainRoots {
-            let indices = subtreeIndices(root: root, in: elements)
-            let subtree = indices.map { elements[$0] }
-            do {
-                let localSelection = try selectControls(in: subtree)
-                controlOwners.append(
-                    (
-                        root: root,
-                        selection: ControlSelection(
-                            composerIndex: indices[localSelection.composerIndex],
-                            sendButtonIndex: indices[localSelection.sendButtonIndex]
-                        )
-                    )
-                )
-            } catch let error as AXError {
-                switch error {
-                case .composerMissing, .sendActionMissing:
-                    continue
-                case .permissionMissing, .codexNotRunning, .taskNotFound,
-                     .ambiguousTask, .composerValueUnreadable, .nativeApprovalCard:
-                    throw error
-                }
-            }
-        }
-
-        let deepestOwners = controlOwners.filter { candidate in
-            !controlOwners.contains { other in
-                other.root != candidate.root
-                    && isDescendant(other.root, of: candidate.root, in: elements)
-            }
-        }
-        guard deepestOwners.count == 1, let owner = deepestOwners.first else {
-            throw deepestOwners.isEmpty ? AXError.taskNotFound : AXError.ambiguousTask
-        }
-
-        let activeIndices = subtreeIndices(root: owner.root, in: elements)
-        let strings = activeIndices.flatMap { index in
-            let element = elements[index]
-            return [element.value, element.title, element.description].compactMap { $0 }
-        }
-        guard strings.contains(title),
-              strings.contains(where: { $0.contains(cwd) })
-        else {
-            throw AXError.taskNotFound
-        }
-
-        return owner.selection
     }
 
     private static func isNativeApprovalControl(_ element: ElementSummary) -> Bool {

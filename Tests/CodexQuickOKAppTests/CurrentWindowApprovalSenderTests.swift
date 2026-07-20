@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 
 @testable import CodexQuickOKApp
@@ -12,7 +13,6 @@ final class CurrentWindowApprovalSenderTests: XCTestCase {
 
         XCTAssertEqual(accessibility.activationCount, 1)
         XCTAssertEqual(accessibility.focusedConversationTimeouts, [1.5])
-        XCTAssertEqual(accessibility.openedSessionIds, [])
     }
 
     func testSendsOneChineseApprovalToCurrentWindow() async throws {
@@ -99,6 +99,25 @@ extension CurrentWindowApprovalSenderTests {
         XCTAssertEqual(automation.writtenValues, ["可"])
         XCTAssertEqual(automation.sendCount, 1)
     }
+}
+
+@MainActor
+private final class FakeAccessibilityController: AccessibilityControlling {
+    private(set) var activationCount = 0
+    private(set) var focusedConversationTimeouts: [TimeInterval] = []
+
+    func activateCodex() throws {
+        activationCount += 1
+    }
+
+    func waitForFocusedConversation(timeout: TimeInterval) async throws {
+        focusedConversationTimeouts.append(timeout)
+    }
+
+    func frontmostBundleIdentifier() -> String? { "com.openai.codex" }
+    func composerValue() throws -> String { "" }
+    func setComposerValue(_ value: String) throws {}
+    func pressSend() throws {}
 }
 
 @MainActor

@@ -7,13 +7,6 @@ actor CodexAppServerClient {
         case notStarted
     }
 
-    struct ThreadMetadata: Equatable, Sendable {
-        let id: String
-        let title: String
-        let cwd: String
-        let updatedAt: Date
-    }
-
     private var process: Process?
     private var rpc: LineJSONRPCClient?
 
@@ -62,30 +55,6 @@ actor CodexAppServerClient {
         return try JSONDecoder().decode(RateLimitsReadResult.self, from: data)
     }
 
-    func readThreadMetadata(sessionId: String) async throws -> ThreadMetadata {
-        guard let rpc else { throw ClientError.notStarted }
-        let result = try await rpc.request(
-            method: "thread/read",
-            params: ["threadId": .string(sessionId), "includeTurns": .bool(false)]
-        )
-        guard let thread = result.objectValue?["thread"]?.objectValue,
-              let id = thread["id"]?.stringValue,
-              let preview = thread["preview"]?.stringValue,
-              let cwd = thread["cwd"]?.stringValue,
-              let updatedAt = thread["updatedAt"]?.doubleValue
-        else {
-            throw LineJSONRPCClient.RPCError.malformedResponse
-        }
-        let name = thread["name"]?.stringValue
-        let title = name.flatMap { $0.isEmpty ? nil : $0 } ?? preview
-        return ThreadMetadata(
-            id: id,
-            title: title,
-            cwd: cwd,
-            updatedAt: Date(timeIntervalSince1970: updatedAt)
-        )
-    }
-
     func setRateLimitUpdateHandler(_ handler: @escaping @Sendable () -> Void) async throws {
         guard let rpc else { throw ClientError.notStarted }
         await rpc.setNotificationHandler { method in
@@ -102,7 +71,7 @@ actor CodexAppServerClient {
     }
 }
 
-protocol CodexAppServerServing: ThreadMetadataReading {
+protocol CodexAppServerServing: Sendable {
     func start(codexBinary: URL) async throws
     func readRateLimits() async throws -> RateLimitsReadResult
     func setRateLimitUpdateHandler(
