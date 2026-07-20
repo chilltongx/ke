@@ -1,6 +1,7 @@
 import AppKit
 @preconcurrency import ApplicationServices
 import CodexQuickOKCore
+import Darwin
 import ServiceManagement
 
 @MainActor
@@ -12,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let codexBinaryProvider: () throws -> URL
     private let terminationReply: @MainActor (Bool) -> Void
     private let loginItemManager: any LegacyLoginItemManaging
+    private let loginMigrationState: any LegacyLoginItemMigrationStateStoring
+    private let reconnectSleep: @MainActor (TimeInterval) async throws -> Void
     private var panel: (any CompanionPanel)?
     private var controller: ManualApprovalController?
     private var quotaTimer: Timer?
@@ -22,6 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var loginItemRemovalTask: Task<Void, Never>?
     private var shutdownTask: Task<Void, Never>?
     private var shutdownFinished = false
+    private var connectionEpoch: UInt64 = 0
+    private var quotaRequestGeneration: UInt64 = 0
 
     private(set) var isShuttingDown = false
 
@@ -37,12 +42,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appServer: any CodexAppServerServing,
         codexBinaryProvider: @escaping () throws -> URL,
         terminationReply: @escaping @MainActor (Bool) -> Void,
-        loginItemManager: any LegacyLoginItemManaging = MainAppLoginItemManager()
+        loginItemManager: any LegacyLoginItemManaging = MainAppLoginItemManager(),
+        loginMigrationState: any LegacyLoginItemMigrationStateStoring =
+            UserDefaultsLoginItemMigrationState(),
+        reconnectSleep: @escaping @MainActor (TimeInterval) async throws -> Void = {
+            try await Task.sleep(for: .seconds($0))
+        }
     ) {
         self.appServer = appServer
         self.codexBinaryProvider = codexBinaryProvider
         self.terminationReply = terminationReply
         self.loginItemManager = loginItemManager
+        self.loginMigrationState = loginMigrationState
+        self.reconnectSleep = reconnectSleep
         super.init()
     }
 
@@ -69,22 +81,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard loginItemRemovalTask == nil else { return }
         switch loginItemManager.status {
         case .enabled, .requiresApproval:
+            loginMigrationState.removalPending = true
             loginItemRemovalTask = Task { @MainActor [weak self, loginItemManager] in
-                try? await loginItemManager.unregister()
+                do {
+                    try await loginItemManager.unregister()
+                    self?.loginMigrationState.removalPending = false
+                } catch {
+                    self?.loginMigrationState.removalPending = true
+                }
                 self?.loginItemRemovalTask = nil
             }
         case .notRegistered, .notFound:
-            break
+            loginMigrationState.removalPending = false
         @unknown default:
-            break
+            loginMigrationState.removalPending = true
+        }
+    }
+
+    func unregisterLegacyLoginItemForHelper() async -> Int32 {
+        switch loginItemManager.status {
+        case .notRegistered, .notFound:
+            return 0
+        case .enabled, .requiresApproval:
+            do {
+                try await loginItemManager.unregister()
+                return 0
+            } catch {
+                return 1
+            }
+        @unknown default:
+            return 1
         }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--unregister-login-item") {
-            Task { @MainActor in
-                try? await SMAppService.mainApp.unregister()
-                NSApplication.shared.terminate(nil)
+            Task { @MainActor [self] in
+                let status = await unregisterLegacyLoginItemForHelper()
+                Darwin.exit(status)
             }
             return
         }
@@ -118,6 +152,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isShuttingDown = true
         quotaTimer?.invalidate()
         reconnectTask?.cancel()
+        reconnectTask = nil
+        connectionEpoch &+= 1
+        quotaRequestGeneration &+= 1
         controller?.stop()
 
         let startTask = appServerStartTask
@@ -139,6 +176,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         quotaTimer?.invalidate()
         reconnectTask?.cancel()
+        reconnectTask = nil
+        connectionEpoch &+= 1
+        quotaRequestGeneration &+= 1
         controller?.stop()
     }
 
@@ -160,72 +200,119 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func beginAppServerStart() {
-        guard !isShuttingDown, appServerStartTask == nil else { return }
+        guard !isShuttingDown, !isAppServerStarted, appServerStartTask == nil else {
+            return
+        }
+        connectionEpoch &+= 1
+        let epoch = connectionEpoch
         appServerStartTask = Task { @MainActor [weak self] in
-            await self?.startAppServer()
+            await self?.startAppServer(epoch: epoch)
         }
     }
 
-    private func startAppServer() async {
+    private func startAppServer(epoch: UInt64) async {
         guard !isShuttingDown, !Task.isCancelled else { return }
         do {
             let binary = try codexBinaryProvider()
             try await appServer.start(codexBinary: binary)
+            guard isCurrentConnection(epoch) else { return }
             try await appServer.setRateLimitUpdateHandler { [weak self] in
                 Task { @MainActor in
-                    self?.refreshQuota()
+                    self?.rateLimitUpdated(connectionEpoch: epoch)
                 }
             }
-            guard !isShuttingDown, !Task.isCancelled else {
+            guard isCurrentConnection(epoch), !Task.isCancelled else {
                 appServerStartTask = nil
                 return
             }
             isAppServerStarted = true
             reconnectAttempt = 0
             appServerStartTask = nil
-            refreshQuota()
+            refreshQuota(connectionEpoch: epoch)
         } catch {
+            guard isCurrentConnection(epoch) else { return }
             appServerStartTask = nil
-            isAppServerStarted = false
-            panel?.setQuota(nil)
-            guard !isShuttingDown else { return }
-            scheduleReconnect()
+            await handleConnectionFailure(epoch: epoch)
         }
     }
 
-    private func refreshQuota() {
+    func refreshQuota() {
         guard !isShuttingDown, isAppServerStarted else {
             panel?.setQuota(nil)
             return
         }
+        refreshQuota(connectionEpoch: connectionEpoch)
+    }
+
+    private func refreshQuota(connectionEpoch epoch: UInt64) {
+        guard isCurrentConnection(epoch), isAppServerStarted else { return }
+        quotaRequestGeneration &+= 1
+        let requestGeneration = quotaRequestGeneration
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 let result = try await appServer.readRateLimits()
+                guard isCurrentQuotaRequest(requestGeneration, epoch: epoch) else {
+                    return
+                }
                 panel?.setQuota(QuotaSelector.weeklyQuota(from: result))
             } catch {
-                isAppServerStarted = false
-                panel?.setQuota(nil)
-                await appServer.stop()
-                scheduleReconnect()
+                guard isCurrentQuotaRequest(requestGeneration, epoch: epoch) else {
+                    return
+                }
+                await handleConnectionFailure(epoch: epoch)
             }
         }
     }
 
-    private func scheduleReconnect() {
-        guard !isShuttingDown, reconnectTask == nil else { return }
+    private func handleConnectionFailure(epoch: UInt64) async {
+        guard isCurrentConnection(epoch) else { return }
+        connectionEpoch &+= 1
+        quotaRequestGeneration &+= 1
+        let failedEpoch = connectionEpoch
+        isAppServerStarted = false
+        panel?.setQuota(nil)
+        await appServer.stop()
+        guard isCurrentConnection(failedEpoch) else { return }
+        scheduleReconnect(connectionEpoch: failedEpoch)
+    }
+
+    private func rateLimitUpdated(connectionEpoch epoch: UInt64) {
+        guard isCurrentConnection(epoch), isAppServerStarted else { return }
+        refreshQuota(connectionEpoch: epoch)
+    }
+
+    private func scheduleReconnect(connectionEpoch epoch: UInt64) {
+        guard isCurrentConnection(epoch), reconnectTask == nil else { return }
         let delay = Self.reconnectDelay(forAttempt: reconnectAttempt)
         reconnectAttempt += 1
         reconnectTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(for: .seconds(delay))
+                guard let self else { return }
+                try await reconnectSleep(delay)
             } catch {
                 return
             }
-            guard !Task.isCancelled, let self else { return }
+            guard !Task.isCancelled,
+                  let self,
+                  isCurrentConnection(epoch)
+            else { return }
             reconnectTask = nil
             beginAppServerStart()
         }
+    }
+
+    private func isCurrentConnection(_ epoch: UInt64) -> Bool {
+        !isShuttingDown && connectionEpoch == epoch
+    }
+
+    private func isCurrentQuotaRequest(
+        _ requestGeneration: UInt64,
+        epoch: UInt64
+    ) -> Bool {
+        isCurrentConnection(epoch)
+            && isAppServerStarted
+            && quotaRequestGeneration == requestGeneration
     }
 
     private func showOnboardingIfNeeded() {

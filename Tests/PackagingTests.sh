@@ -63,6 +63,7 @@ expect_executable scripts/render-app-icon.swift
 expect_executable Tests/AppIconTests.sh
 expect_executable Tests/SigningTests.sh
 expect_executable Tests/InstallLocalTests.sh
+expect_executable Tests/BuildReleaseTests.sh
 
 expect_exact_line .gitignore 'dist/'
 
@@ -88,39 +89,44 @@ if [[ -f "$ROOT/Resources/PrivacyInfo.xcprivacy" ]]; then
 fi
 
 if [[ -f "$ROOT/scripts/build-release.sh" ]]; then
-  expect_exact_line scripts/build-release.sh 'swift build --package-path "$ROOT" -c release'
-  expect_exact_line scripts/build-release.sh 'rm -rf "$ROOT/dist"'
-  expect_exact_line scripts/build-release.sh '"$ROOT/scripts/render-app-icon.swift" "$ICONSET"'
-  expect_exact_line scripts/build-release.sh 'iconutil -c icns "$ICONSET" -o "$ICON_BUILD_DIR/AppIcon.icns"'
+  expect_exact_line scripts/build-release.sh '"$SWIFT" build --package-path "$ROOT" -c release'
+  expect_exact_line scripts/build-release.sh 'STAGING_ROOT="$("$MKTEMP" -d "$DIST_DIR/.CodexQuickOK-build.XXXXXX")"'
+  expect_exact_line scripts/build-release.sh '"$ICON_RENDERER" "$ICONSET"'
+  expect_exact_line scripts/build-release.sh '"$ICONUTIL" -c icns "$ICONSET" -o "$ICON_BUILD_DIR/AppIcon.icns"'
   expect_exact_line scripts/build-release.sh 'cp "$ICON_BUILD_DIR/AppIcon.icns" \'
   expect_exact_line scripts/build-release.sh '  "$APP/Contents/Resources/AppIcon.icns"'
   expect_exact_line scripts/build-release.sh 'SIGNING_IDENTITY_NAME="${CODEX_QUICK_OK_SIGNING_IDENTITY:-Codex Quick OK Local Signing}"'
   expect_exact_line scripts/build-release.sh '"$CODESIGN" --force --timestamp=none --sign "$identity_sha1" --keychain "$LOGIN_KEYCHAIN" --requirements "=$DESIGNATED_REQUIREMENT" "$APP"'
   expect_exact_line scripts/build-release.sh '"$CODESIGN" --verify --deep --strict --test-requirement "=$DESIGNATED_REQUIREMENT_EXPRESSION" "$APP"'
+  expect_absent_text scripts/build-release.sh '^rm -rf "\$ROOT/dist"$'
 fi
 
 if [[ -f "$ROOT/scripts/install-local.sh" ]]; then
   expect_exact_line scripts/install-local.sh 'DEST_APP="$HOME/Applications/Codex 可.app"'
   expect_exact_line scripts/install-local.sh 'APP_PROCESS="CodexQuickOKApp"'
   expect_exact_line scripts/install-local.sh 'STOP_ATTEMPTS=50'
-  expect_exact_line scripts/install-local.sh '  killall "$APP_PROCESS"'
+  expect_exact_line scripts/install-local.sh 'DEST_EXECUTABLE="$DEST_APP/Contents/MacOS/CodexQuickOKApp"'
+  expect_exact_line scripts/install-local.sh '    [[ "$executable" == "$DEST_EXECUTABLE" ]] && print -r -- "$pid"'
+  expect_exact_line scripts/install-local.sh '    "$KILL" -TERM "$pid"'
   expect_exact_line scripts/install-local.sh '  for (( attempt = 0; attempt < STOP_ATTEMPTS; attempt++ )); do'
-  expect_exact_line scripts/install-local.sh '    pgrep -x "$APP_PROCESS" >/dev/null || return 0'
-  expect_exact_line scripts/install-local.sh '    sleep 0.1'
+  expect_exact_line scripts/install-local.sh '      "$KILL" -0 "$pid" 2>/dev/null && still_running=true'
+  expect_exact_line scripts/install-local.sh '    "$SLEEP" 0.1'
   expect_exact_line scripts/install-local.sh '  print -u2 -- "Codex 可未能在 5 秒内退出；安装已中止。"'
   expect_exact_line scripts/install-local.sh '  return 75'
   expect_exact_line scripts/install-local.sh 'stop_running_app'
+  expect_exact_line scripts/install-local.sh 'verify_app "$SOURCE_APP"'
+  expect_exact_line scripts/install-local.sh 'STAGING_ROOT="$("$MKTEMP" -d "$HOME/Applications/.CodexQuickOK.install.XXXXXX")"'
+  expect_exact_line scripts/install-local.sh '"$DITTO" "$SOURCE_APP" "$STAGED_APP"'
+  expect_exact_line scripts/install-local.sh 'verify_app "$STAGED_APP"'
   expect_exact_line scripts/install-local.sh '"$LSREGISTER" -f "$DEST_APP"'
-  expect_exact_line scripts/install-local.sh 'touch "$DEST_APP"'
-  expect_exact_line scripts/install-local.sh 'killall Dock || true'
-  expect_absent_text scripts/install-local.sh 'killall "\$APP_PROCESS".*\|\| true'
-  expect_line_before scripts/install-local.sh '  killall "$APP_PROCESS"' \
-    '  for (( attempt = 0; attempt < STOP_ATTEMPTS; attempt++ )); do'
+  expect_exact_line scripts/install-local.sh '"$TOUCH" "$DEST_APP"'
+  expect_exact_line scripts/install-local.sh '"$KILLALL" Dock || true'
+  expect_absent_text scripts/install-local.sh 'killall "\$APP_PROCESS"|killall CodexQuickOKApp'
   expect_line_before scripts/install-local.sh \
     '  for (( attempt = 0; attempt < STOP_ATTEMPTS; attempt++ )); do' \
     '  print -u2 -- "Codex 可未能在 5 秒内退出；安装已中止。"'
-  expect_line_before scripts/install-local.sh 'stop_running_app' 'rm -rf "$DEST_APP"'
-  expect_line_before scripts/install-local.sh 'rm -rf "$DEST_APP"' 'open "$DEST_APP"'
+  expect_line_before scripts/install-local.sh 'verify_app "$SOURCE_APP"' 'stop_running_app'
+  expect_line_before scripts/install-local.sh 'verify_app "$STAGED_APP"' 'stop_running_app'
 fi
 
 if [[ -f "$ROOT/scripts/uninstall-local.sh" ]]; then
@@ -130,10 +136,9 @@ if [[ -f "$ROOT/scripts/uninstall-local.sh" ]]; then
     'codex plugin remove codex-quick-ok --marketplace codex-quick-ok-local --json || true'
   expect_exact_line scripts/uninstall-local.sh \
     'codex plugin marketplace remove codex-quick-ok-local --json || true'
-  expect_exact_line scripts/uninstall-local.sh '  open -n -W "$APP" --args --unregister-login-item || true'
-  expect_exact_line scripts/uninstall-local.sh 'rm -rf "$APP" "$SUPPORT"'
-  rm_lines="$(grep -E '^[[:space:]]*rm([[:space:]]|$)' "$ROOT/scripts/uninstall-local.sh" || true)"
-  [[ "$rm_lines" == 'rm -rf "$APP" "$SUPPORT"' ]] || fail 'uninstall may only delete the two owned paths'
+  expect_exact_line scripts/uninstall-local.sh '  "$OPEN" -n -W "$APP" --args --unregister-login-item'
+  expect_exact_line scripts/uninstall-local.sh '"$RM" -rf "$APP" "$SUPPORT"'
+  expect_absent_text scripts/uninstall-local.sh 'unregister-login-item.*\|\| true'
   expect_absent_text scripts/uninstall-local.sh '^[[:space:]]*open -W "\$APP" --args --unregister-login-item'
   expect_absent_text scripts/uninstall-local.sh '\.codex/(config\.toml|hooks\.json)|tccutil|Accessibility'
 fi
@@ -144,6 +149,7 @@ expect_absent_text scripts/install-local.sh 'codex plugin|/hooks|登录项'
 expect_absent_text README.md '/hooks|等待批准任务|登录项默认开启'
 
 zsh "$ROOT/Tests/InstallLocalTests.sh" || fail 'install-local behavioral checks failed'
+zsh "$ROOT/Tests/BuildReleaseTests.sh" || fail 'build-release behavioral checks failed'
 
 if [[ -f "$ROOT/README.md" ]]; then
   expected_headings=('# Codex 可' '## 安装' '## 使用' '## 安全边界' '## 卸载')

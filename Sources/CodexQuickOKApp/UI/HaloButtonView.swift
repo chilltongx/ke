@@ -42,6 +42,13 @@ final class HaloButtonView: NSView {
                 halo: .chalk
             )
         }
+        if feedbackState == .failure {
+            return HaloDrawingState(
+                sealFill: .red,
+                glyph: .chalk,
+                halo: .red
+            )
+        }
         let percent = remainingPercent.map { min(100, max(0, $0)) }
         return HaloDrawingState(
             sealFill: .coal,
@@ -99,7 +106,7 @@ final class HaloButtonView: NSView {
     func showSuccessFeedback() {
         toolTip = quotaToolTip
         feedbackState = .success
-        setAccessibilityValue("批准成功")
+        setAccessibilityValue("已发送可")
         needsDisplay = true
     }
 

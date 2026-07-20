@@ -3,12 +3,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALLER="$ROOT/scripts/install-local.sh"
+UNINSTALLER="$ROOT/scripts/uninstall-local.sh"
 TMP_ROOT="$(mktemp -d)"
 SHIM_DIR="$TMP_ROOT/shims"
+IDENTITY_SHA1="CA25F15FECEACBC83936E31F3EAC0E994A447338"
 
-cleanup() {
-  /bin/rm -rf "$TMP_ROOT"
-}
+cleanup() { /bin/rm -rf "$TMP_ROOT" }
 trap cleanup EXIT
 
 fail() {
@@ -16,160 +16,206 @@ fail() {
   exit 1
 }
 
-require_exact_line() {
-  local line="$1"
-  grep -Fxq -- "$line" "$INSTALLER" || fail "installer is missing testable command override: $line"
-}
-
-event_count() {
-  local log="$1"
-  local pattern="$2"
-  grep -cF -- "$pattern" "$log" || true
-}
-
 expect_event() {
-  local log="$1"
-  local pattern="$2"
-  grep -Fq -- "$pattern" "$log" || fail "missing event '$pattern' in $log"
+  grep -Fq -- "$2" "$1" || fail "missing event '$2' in $1"
 }
 
 expect_no_event() {
-  local log="$1"
-  local pattern="$2"
-  if grep -Fq -- "$pattern" "$log"; then
-    fail "unexpected event '$pattern' in $log"
-  fi
+  grep -Fq -- "$2" "$1" && fail "unexpected event '$2' in $1"
+  return 0
 }
-
-expect_event_before() {
-  local log="$1"
-  local first="$2"
-  local second="$3"
-  local first_line second_line
-  first_line="$(grep -nF -- "$first" "$log" | head -n 1 | cut -d: -f1 || true)"
-  second_line="$(grep -nF -- "$second" "$log" | head -n 1 | cut -d: -f1 || true)"
-  if [[ -z "$first_line" || -z "$second_line" || "$first_line" -ge "$second_line" ]]; then
-    fail "expected '$first' before '$second' in $log"
-  fi
-}
-
-require_exact_line 'SOURCE_APP="${CODEX_QUICK_OK_SOURCE_APP:-$ROOT/dist/Codex 可.app}"'
-require_exact_line 'LSREGISTER="${CODEX_QUICK_OK_LSREGISTER:-$DEFAULT_LSREGISTER}"'
 
 mkdir -p "$SHIM_DIR"
 cat > "$SHIM_DIR/command-shim" <<'SHIM'
 #!/bin/zsh
-
-command_name="${0:t}"
+set -u
+name="${0:t}"
 log="$INSTALL_TEST_LOG"
+print -r -- "$name:$*" >> "$log"
 
-case "$command_name" in
+case "$name" in
+  security)
+    print '  1) CA25F15FECEACBC83936E31F3EAC0E994A447338 "Codex Quick OK Local Signing"'
+    ;;
+  codesign)
+    if [[ "$INSTALL_TEST_SCENARIO" == invalid_source && "$*" == *"$INSTALL_TEST_SOURCE" ]]; then
+      exit 1
+    fi
+    ;;
   pgrep)
-    count=0
-    [[ -f "$INSTALL_TEST_PGREP_COUNT" ]] && count="$(<"$INSTALL_TEST_PGREP_COUNT")"
-    count=$((count + 1))
-    print -r -- "$count" > "$INSTALL_TEST_PGREP_COUNT"
-    print -r -- "pgrep:$count:$*" >> "$log"
     case "$INSTALL_TEST_SCENARIO" in
-      no_process) exit 1 ;;
-      term_succeeds) (( count < 3 )) && exit 0 || exit 1 ;;
-      stuck) exit 0 ;;
-      *) exit 64 ;;
+      owned_and_unowned|owned_stuck) print '101'; print '202' ;;
+      *) exit 1 ;;
     esac
     ;;
-  killall)
-    print -r -- "killall:$*" >> "$log"
+  ps)
+    [[ "$*" == *"101"* ]] && print -r -- "$INSTALL_TEST_OWNED_EXECUTABLE" || \
+      print -r -- '/tmp/unowned/CodexQuickOKApp'
     ;;
-  sleep)
-    print -r -- "sleep:$*" >> "$log"
+  kill)
+    if [[ "${1:-}" == -0 ]]; then
+      [[ "$INSTALL_TEST_SCENARIO" == owned_stuck ]] && exit 0
+      count=0
+      [[ -f "$INSTALL_TEST_KILL_COUNT" ]] && count="$(<"$INSTALL_TEST_KILL_COUNT")"
+      count=$((count + 1))
+      print -r -- "$count" > "$INSTALL_TEST_KILL_COUNT"
+      (( count < 2 )) && exit 0 || exit 1
+    fi
     ;;
-  rm)
-    print -r -- "rm:$*" >> "$log"
-    /bin/rm "$@"
-    ;;
+  sleep) ;;
   ditto)
-    print -r -- "ditto:$*" >> "$log"
+    [[ "$INSTALL_TEST_SCENARIO" == copy_failure ]] && exit 1
     /bin/mkdir -p "$2"
+    print -r -- new > "$2/new-marker"
     ;;
-  lsregister)
-    print -r -- "lsregister:$*" >> "$log"
+  mv)
+    if [[ "$INSTALL_TEST_SCENARIO" == swap_failure && "$1" == *'.install.'* ]]; then
+      exit 1
+    fi
+    /bin/mv "$@"
     ;;
-  open)
-    print -r -- "open:$*" >> "$log"
-    ;;
+  rm) /bin/rm "$@" ;;
+  mkdir) /bin/mkdir "$@" ;;
+  mktemp) /usr/bin/mktemp "$@" ;;
+  touch) /usr/bin/touch "$@" ;;
+  lsregister|open|killall) ;;
+  codex) ;;
   *) exit 64 ;;
 esac
 SHIM
 chmod +x "$SHIM_DIR/command-shim"
-for command in pgrep killall sleep rm ditto open lsregister; do
+for command in security codesign pgrep ps kill sleep ditto mv rm mkdir mktemp touch \
+  lsregister open killall codex; do
   ln -s command-shim "$SHIM_DIR/$command"
 done
 
-run_scenario() {
+run_install() {
   local scenario="$1"
   local scenario_root="$TMP_ROOT/$scenario"
   local home="$scenario_root/home"
   local source="$scenario_root/source/Codex 可.app"
+  local dest="$home/Applications/Codex 可.app"
   local log="$scenario_root/events.log"
-  local stdout="$scenario_root/stdout.log"
-  local stderr="$scenario_root/stderr.log"
-  local count="$scenario_root/pgrep-count"
-
-  mkdir -p "$home" "$source"
+  mkdir -p "$source" "$dest"
+  print -r -- old > "$dest/old-marker"
   : > "$log"
-  print -r -- 0 > "$count"
+  : > "$scenario_root/kill-count"
 
   set +e
   HOME="$home" \
   PATH="$SHIM_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
   CODEX_QUICK_OK_SOURCE_APP="$source" \
+  CODEX_QUICK_OK_KEYCHAIN="$scenario_root/login.keychain-db" \
+  CODEX_QUICK_OK_SECURITY="$SHIM_DIR/security" \
+  CODEX_QUICK_OK_CODESIGN="$SHIM_DIR/codesign" \
   CODEX_QUICK_OK_LSREGISTER="$SHIM_DIR/lsregister" \
+  CODEX_QUICK_OK_PGREP="$SHIM_DIR/pgrep" \
+  CODEX_QUICK_OK_PS="$SHIM_DIR/ps" \
+  CODEX_QUICK_OK_KILL="$SHIM_DIR/kill" \
+  CODEX_QUICK_OK_SLEEP="$SHIM_DIR/sleep" \
+  CODEX_QUICK_OK_DITTO="$SHIM_DIR/ditto" \
+  CODEX_QUICK_OK_MV="$SHIM_DIR/mv" \
+  CODEX_QUICK_OK_RM="$SHIM_DIR/rm" \
+  CODEX_QUICK_OK_MKDIR="$SHIM_DIR/mkdir" \
+  CODEX_QUICK_OK_MKTEMP="$SHIM_DIR/mktemp" \
+  CODEX_QUICK_OK_TOUCH="$SHIM_DIR/touch" \
+  CODEX_QUICK_OK_OPEN="$SHIM_DIR/open" \
+  CODEX_QUICK_OK_KILLALL="$SHIM_DIR/killall" \
   INSTALL_TEST_SCENARIO="$scenario" \
   INSTALL_TEST_LOG="$log" \
-  INSTALL_TEST_PGREP_COUNT="$count" \
-    zsh "$INSTALLER" >"$stdout" 2>"$stderr"
-  local exit_code=$?
+  INSTALL_TEST_SOURCE="$source" \
+  INSTALL_TEST_OWNED_EXECUTABLE="$dest/Contents/MacOS/CodexQuickOKApp" \
+  INSTALL_TEST_KILL_COUNT="$scenario_root/kill-count" \
+    zsh "$INSTALLER" >"$scenario_root/stdout" 2>"$scenario_root/stderr"
+  typeset -g SCENARIO_STATUS=$?
   set -e
 
-  typeset -g SCENARIO_ROOT="$scenario_root"
   typeset -g SCENARIO_HOME="$home"
   typeset -g SCENARIO_SOURCE="$source"
+  typeset -g SCENARIO_DEST="$dest"
   typeset -g SCENARIO_LOG="$log"
-  typeset -g SCENARIO_STDERR="$stderr"
-  typeset -g SCENARIO_COUNT="$count"
-  typeset -g SCENARIO_STATUS="$exit_code"
+  typeset -g SCENARIO_STDERR="$scenario_root/stderr"
 }
 
-run_scenario no_process
-[[ "$SCENARIO_STATUS" -eq 0 ]] || fail "no-process install exited $SCENARIO_STATUS"
-[[ "$(<"$SCENARIO_COUNT")" == 1 ]] || fail "no-process install must probe exactly once"
-expect_no_event "$SCENARIO_LOG" 'killall:CodexQuickOKApp'
-expect_no_event "$SCENARIO_LOG" 'sleep:'
-expect_event "$SCENARIO_LOG" "rm:-rf $SCENARIO_HOME/Applications/Codex 可.app"
-expect_event "$SCENARIO_LOG" "ditto:$SCENARIO_SOURCE $SCENARIO_HOME/Applications/Codex 可.app"
-expect_event "$SCENARIO_LOG" "lsregister:-f $SCENARIO_HOME/Applications/Codex 可.app"
-expect_event "$SCENARIO_LOG" "open:$SCENARIO_HOME/Applications/Codex 可.app"
-
-run_scenario term_succeeds
-[[ "$SCENARIO_STATUS" -eq 0 ]] || fail "terminating install exited $SCENARIO_STATUS"
-[[ "$(<"$SCENARIO_COUNT")" == 3 ]] || fail "terminating install must stop after third probe"
-[[ "$(event_count "$SCENARIO_LOG" 'sleep:0.1')" == 2 ]] || fail "terminating install must wait twice"
-expect_event_before "$SCENARIO_LOG" 'killall:CodexQuickOKApp' 'sleep:0.1'
-expect_event_before "$SCENARIO_LOG" 'pgrep:3:-x CodexQuickOKApp' "rm:-rf $SCENARIO_HOME/Applications/Codex 可.app"
-expect_event_before "$SCENARIO_LOG" "rm:-rf $SCENARIO_HOME/Applications/Codex 可.app" "ditto:$SCENARIO_SOURCE"
-expect_event_before "$SCENARIO_LOG" "ditto:$SCENARIO_SOURCE" 'lsregister:-f'
-expect_event_before "$SCENARIO_LOG" 'lsregister:-f' "open:$SCENARIO_HOME/Applications/Codex 可.app"
-
-run_scenario stuck
-[[ "$SCENARIO_STATUS" -eq 75 ]] || fail "stuck install must exit 75, got $SCENARIO_STATUS"
-[[ "$(<"$SCENARIO_COUNT")" == 51 ]] || fail "stuck install must perform one initial and 50 bounded probes"
-[[ "$(event_count "$SCENARIO_LOG" 'sleep:0.1')" == 50 ]] || fail "stuck install must perform 50 bounded waits"
-grep -Fq -- 'Codex 可未能在 5 秒内退出；安装已中止。' "$SCENARIO_STDERR" \
-  || fail 'stuck install must explain timeout'
-expect_no_event "$SCENARIO_LOG" 'rm:'
+run_install invalid_source
+[[ "$SCENARIO_STATUS" -ne 0 ]] || fail 'invalid source signature must fail'
+[[ -f "$SCENARIO_DEST/old-marker" ]] || fail 'invalid source replaced working install'
+expect_no_event "$SCENARIO_LOG" 'pgrep:'
 expect_no_event "$SCENARIO_LOG" 'ditto:'
-expect_no_event "$SCENARIO_LOG" 'lsregister:'
-expect_no_event "$SCENARIO_LOG" 'open:'
-expect_no_event "$SCENARIO_LOG" 'killall:Dock'
 
-print 'Install-local behavioral checks passed.'
+run_install owned_and_unowned
+if [[ "$SCENARIO_STATUS" -ne 0 ]]; then
+  tail -n 30 "$SCENARIO_STDERR" >&2
+  tail -n 60 "$SCENARIO_LOG" >&2
+  fail "owned-process install exited $SCENARIO_STATUS"
+fi
+expect_event "$SCENARIO_LOG" 'kill:-TERM 101'
+expect_no_event "$SCENARIO_LOG" 'kill:-TERM 202'
+expect_event "$SCENARIO_LOG" 'kill:-0 101'
+expect_no_event "$SCENARIO_LOG" 'kill:-0 202'
+expect_event "$SCENARIO_LOG" "codesign:--verify --deep --strict --test-requirement =identifier \"com.codexquickok.CodexQuickOK\" and certificate leaf = H\"$IDENTITY_SHA1\" $SCENARIO_SOURCE"
+[[ -f "$SCENARIO_DEST/new-marker" ]] || fail 'successful install did not publish staged app'
+[[ ! -f "$SCENARIO_DEST/old-marker" ]] || fail 'successful install kept old app contents'
+
+run_install owned_stuck
+[[ "$SCENARIO_STATUS" -eq 75 ]] || fail "stuck owned process must exit 75, got $SCENARIO_STATUS"
+[[ -f "$SCENARIO_DEST/old-marker" ]] || fail 'stuck process replaced working install'
+expect_no_event "$SCENARIO_LOG" "mv:$SCENARIO_DEST"
+
+run_install copy_failure
+[[ "$SCENARIO_STATUS" -ne 0 ]] || fail 'copy failure must fail install'
+[[ -f "$SCENARIO_DEST/old-marker" ]] || fail 'copy failure removed working install'
+
+run_install swap_failure
+[[ "$SCENARIO_STATUS" -ne 0 ]] || fail 'swap failure must fail install'
+[[ -f "$SCENARIO_DEST/old-marker" ]] || fail 'swap failure did not restore working install'
+[[ ! -f "$SCENARIO_DEST/new-marker" ]] || fail 'swap failure left staged app at destination'
+
+run_uninstall() {
+  local scenario="$1"
+  local scenario_root="$TMP_ROOT/uninstall-$scenario"
+  local home="$scenario_root/home"
+  local app="$home/Applications/Codex 可.app"
+  local support="$home/Library/Application Support/CodexQuickOK"
+  local log="$scenario_root/events.log"
+  mkdir -p "$app" "$support"
+  : > "$log"
+  set +e
+  HOME="$home" \
+  PATH="$SHIM_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+  CODEX_QUICK_OK_OPEN="$SHIM_DIR/open" \
+  CODEX_QUICK_OK_RM="$SHIM_DIR/rm" \
+  INSTALL_TEST_SCENARIO="$scenario" \
+  INSTALL_TEST_LOG="$log" \
+  INSTALL_TEST_SOURCE='' \
+  INSTALL_TEST_OWNED_EXECUTABLE='' \
+  INSTALL_TEST_KILL_COUNT="$scenario_root/kill-count" \
+    zsh "$UNINSTALLER" >"$scenario_root/stdout" 2>"$scenario_root/stderr"
+  typeset -g UNINSTALL_STATUS=$?
+  set -e
+  typeset -g UNINSTALL_APP="$app"
+  typeset -g UNINSTALL_SUPPORT="$support"
+}
+
+# The open shim represents the helper result. Force one helper failure without
+# touching an installed app outside the isolated HOME.
+/bin/rm "$SHIM_DIR/open"
+cat > "$SHIM_DIR/open" <<'SHIM'
+#!/bin/zsh
+print -r -- "open:$*" >> "$INSTALL_TEST_LOG"
+[[ "$INSTALL_TEST_SCENARIO" == helper_failure ]] && exit 1
+exit 0
+SHIM
+chmod +x "$SHIM_DIR/open"
+
+run_uninstall helper_failure
+[[ "$UNINSTALL_STATUS" -ne 0 ]] || fail 'uninstall swallowed login helper failure'
+[[ -d "$UNINSTALL_APP" && -d "$UNINSTALL_SUPPORT" ]] \
+  || fail 'uninstall deleted files after login helper failure'
+
+run_uninstall helper_success
+[[ "$UNINSTALL_STATUS" -eq 0 ]] || fail "successful uninstall exited $UNINSTALL_STATUS"
+[[ ! -e "$UNINSTALL_APP" && ! -e "$UNINSTALL_SUPPORT" ]] \
+  || fail 'successful uninstall kept owned files'
+
+print 'Install/uninstall behavioral checks passed.'

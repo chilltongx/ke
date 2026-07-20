@@ -3,6 +3,7 @@ import Foundation
 @MainActor
 protocol CurrentCodexAutomating: AnyObject {
     func activateCurrentWindow() async throws
+    func revalidateTarget() throws
     func frontmostBundleIdentifier() -> String?
     func composerValue() throws -> String
     func setComposerValue(_ value: String) throws
@@ -18,8 +19,11 @@ final class CurrentCodexAutomation: CurrentCodexAutomating {
     }
 
     func activateCurrentWindow() async throws {
-        try accessibility.activateCodex()
-        try await accessibility.waitForFocusedConversation(timeout: 1.5)
+        try await accessibility.prepareFocusedConversation(timeout: 1.5)
+    }
+
+    func revalidateTarget() throws {
+        try accessibility.revalidateFocusedConversation()
     }
 
     func frontmostBundleIdentifier() -> String? {

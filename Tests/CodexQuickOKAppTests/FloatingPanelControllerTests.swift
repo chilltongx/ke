@@ -107,6 +107,25 @@ final class FloatingPanelControllerTests: XCTestCase {
         controller.hide()
     }
 
+    func testReduceMotionFailureUsesStaticRedDrawingState() {
+        let controller = FloatingPanelController(
+            positionStore: PanelPositionStore(
+                defaults: UserDefaults(suiteName: #function)!
+            ),
+            reduceMotion: { true }
+        )
+
+        controller.setQuota(nil)
+        controller.showFailure("发送失败")
+
+        XCTAssertNil(controller.button.layer?.animation(forKey: "failure"))
+        XCTAssertEqual(
+            controller.button.drawingState,
+            HaloDrawingState(sealFill: .red, glyph: .chalk, halo: .red)
+        )
+        controller.hide()
+    }
+
     func testSuccessReplacingFailureRestoresQuotaTooltipImmediately() {
         let scheduler = ManualFeedbackScheduler()
         let announcer = RecordingAccessibilityAnnouncer()

@@ -43,6 +43,7 @@ final class HaloButtonViewTests: XCTestCase {
                 halo: .chalk
             )
         )
+        XCTAssertEqual(button.accessibilityValue() as? String, "已发送可")
     }
 
     func testFailureReplacingSuccessInvalidatesInvertedSeal() {
@@ -70,9 +71,9 @@ final class HaloButtonViewTests: XCTestCase {
         XCTAssertEqual(
             button.drawingState,
             HaloDrawingState(
-                sealFill: .coal,
+                sealFill: .red,
                 glyph: .chalk,
-                halo: .unavailable
+                halo: .red
             )
         )
     }

@@ -112,6 +112,7 @@ final class RecordingPanel: CompanionPanel {
     private(set) var sendingValues: [Bool] = []
     private(set) var failures: [String] = []
     private(set) var successCount = 0
+    private(set) var quotas: [WeeklyQuota?] = []
 
     func show(mode: CompanionMode) {
         lastMode = mode
@@ -123,7 +124,7 @@ final class RecordingPanel: CompanionPanel {
         shownModes.append(.hidden)
     }
 
-    func setQuota(_ quota: WeeklyQuota?) {}
+    func setQuota(_ quota: WeeklyQuota?) { quotas.append(quota) }
     func setSending(_ sending: Bool) { sendingValues.append(sending) }
     func showSuccess() { successCount += 1 }
     func showFailure(_ message: String) { failures.append(message) }

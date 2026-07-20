@@ -5,14 +5,13 @@ import XCTest
 
 @MainActor
 final class CurrentWindowApprovalSenderTests: XCTestCase {
-    func testAutomationActivatesAndWaitsForFocusedConversation() async throws {
+    func testAutomationPreparesOnePidBoundFocusedConversation() async throws {
         let accessibility = FakeAccessibilityController()
         let automation = CurrentCodexAutomation(accessibility: accessibility)
 
         try await automation.activateCurrentWindow()
 
-        XCTAssertEqual(accessibility.activationCount, 1)
-        XCTAssertEqual(accessibility.focusedConversationTimeouts, [1.5])
+        XCTAssertEqual(accessibility.preparationTimeouts, [1.5])
     }
 
     func testSendsOneChineseApprovalToCurrentWindow() async throws {
@@ -24,6 +23,7 @@ final class CurrentWindowApprovalSenderTests: XCTestCase {
         try await CurrentWindowApprovalSender(automation: automation).sendOK()
 
         XCTAssertEqual(automation.activationCount, 1)
+        XCTAssertEqual(automation.revalidationCount, 2)
         XCTAssertEqual(automation.writtenValues, ["可"])
         XCTAssertEqual(automation.sendCount, 1)
     }
@@ -89,6 +89,39 @@ final class CurrentWindowApprovalSenderTests: XCTestCase {
         await assertRejectedWithoutWriting(automation)
     }
 
+    func testFrontmostSwitchImmediatelyBeforeComposerMutationFailsClosed() async {
+        let automation = FakeCurrentCodexAutomation(
+            bundleId: "com.openai.codex",
+            value: ""
+        )
+        automation.revalidationErrors = [
+            AccessibilityClient.AXError.targetApplicationChanged,
+        ]
+
+        await assertRejectedWithoutWriting(automation)
+        XCTAssertEqual(automation.revalidationCount, 1)
+    }
+
+    func testFrontmostSwitchImmediatelyBeforeSendLeavesApprovalWithoutPressing() async {
+        let automation = FakeCurrentCodexAutomation(
+            bundleId: "com.openai.codex",
+            value: ""
+        )
+        automation.revalidationErrors = [
+            nil,
+            AccessibilityClient.AXError.targetApplicationChanged,
+        ]
+
+        do {
+            try await CurrentWindowApprovalSender(automation: automation).sendOK()
+            XCTFail("Expected PID revalidation failure")
+        } catch {}
+
+        XCTAssertEqual(automation.writtenValues, ["可"])
+        XCTAssertEqual(automation.sendAttempts, 0)
+        XCTAssertEqual(automation.revalidationCount, 2)
+    }
+
     private func assertRejectedWithoutWriting(
         _ automation: FakeCurrentCodexAutomation
     ) async {
@@ -133,18 +166,14 @@ extension CurrentWindowApprovalSenderTests {
 
 @MainActor
 private final class FakeAccessibilityController: AccessibilityControlling {
-    private(set) var activationCount = 0
-    private(set) var focusedConversationTimeouts: [TimeInterval] = []
+    private(set) var preparationTimeouts: [TimeInterval] = []
 
-    func activateCodex() throws {
-        activationCount += 1
-    }
-
-    func waitForFocusedConversation(timeout: TimeInterval) async throws {
-        focusedConversationTimeouts.append(timeout)
+    func prepareFocusedConversation(timeout: TimeInterval) async throws {
+        preparationTimeouts.append(timeout)
     }
 
     func frontmostBundleIdentifier() -> String? { "com.openai.codex" }
+    func revalidateFocusedConversation() throws {}
     func composerValue() throws -> String { "" }
     func setComposerValue(_ value: String) throws {}
     func pressSend() throws {}
@@ -164,7 +193,9 @@ private final class FakeCurrentCodexAutomation: CurrentCodexAutomating {
     var activationError: Error?
     var composerError: Error?
     var sendError: Error?
+    var revalidationErrors: [Error?] = []
     private(set) var activationCount = 0
+    private(set) var revalidationCount = 0
     private(set) var writtenValues: [String] = []
     private(set) var sendAttempts = 0
     private(set) var sendCount = 0
@@ -181,6 +212,13 @@ private final class FakeCurrentCodexAutomation: CurrentCodexAutomating {
     }
 
     func frontmostBundleIdentifier() -> String? { bundleId }
+    func revalidateTarget() throws {
+        let index = revalidationCount
+        revalidationCount += 1
+        if revalidationErrors.indices.contains(index), let error = revalidationErrors[index] {
+            throw error
+        }
+    }
     func composerValue() throws -> String {
         if let composerError { throw composerError }
         return value

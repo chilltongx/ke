@@ -34,7 +34,9 @@ final class CurrentWindowApprovalSender: CurrentApprovalSending {
             bundleId: automation.frontmostBundleIdentifier(),
             composerValue: value
         )
+        try automation.revalidateTarget()
         try automation.setComposerValue("可")
+        try automation.revalidateTarget()
         try automation.performSend()
     }
 }
