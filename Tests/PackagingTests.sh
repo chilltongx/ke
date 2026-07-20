@@ -62,6 +62,7 @@ expect_file scripts/render-app-icon.swift
 expect_executable scripts/render-app-icon.swift
 expect_executable Tests/AppIconTests.sh
 expect_executable Tests/SigningTests.sh
+expect_executable Tests/InstallLocalTests.sh
 
 expect_exact_line .gitignore 'dist/'
 
@@ -141,6 +142,8 @@ expect_absent_text Package.swift 'CodexQuickOKHook'
 expect_absent_text scripts/build-release.sh 'CodexQuickOKHook|dist/marketplace|PLUGIN='
 expect_absent_text scripts/install-local.sh 'codex plugin|/hooks|登录项'
 expect_absent_text README.md '/hooks|等待批准任务|登录项默认开启'
+
+zsh "$ROOT/Tests/InstallLocalTests.sh" || fail 'install-local behavioral checks failed'
 
 if [[ -f "$ROOT/README.md" ]]; then
   expected_headings=('# Codex 可' '## 安装' '## 使用' '## 安全边界' '## 卸载')

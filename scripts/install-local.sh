@@ -2,9 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SOURCE_APP="$ROOT/dist/Codex 可.app"
+SOURCE_APP="${CODEX_QUICK_OK_SOURCE_APP:-$ROOT/dist/Codex 可.app}"
 DEST_APP="$HOME/Applications/Codex 可.app"
-LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+DEFAULT_LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+LSREGISTER="${CODEX_QUICK_OK_LSREGISTER:-$DEFAULT_LSREGISTER}"
 APP_PROCESS="CodexQuickOKApp"
 STOP_ATTEMPTS=50
 
