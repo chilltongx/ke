@@ -79,6 +79,7 @@ if [[ -f "$ROOT/scripts/build-release.sh" ]]; then
   expect_exact_line scripts/build-release.sh 'rm -rf "$ROOT/dist"'
   expect_exact_line scripts/build-release.sh '"$ROOT/scripts/render-app-icon.swift" "$ICONSET"'
   expect_exact_line scripts/build-release.sh 'iconutil -c icns "$ICONSET" -o "$ICON_BUILD_DIR/AppIcon.icns"'
+  expect_exact_line scripts/build-release.sh 'cp "$ICON_BUILD_DIR/AppIcon.icns" \'
   expect_exact_line scripts/build-release.sh '  "$APP/Contents/Resources/AppIcon.icns"'
   expect_exact_line scripts/build-release.sh 'SIGNING_IDENTITY_NAME="${CODEX_QUICK_OK_SIGNING_IDENTITY:-Codex Quick OK Local Signing}"'
   expect_exact_line scripts/build-release.sh '"$CODESIGN" --force --timestamp=none --sign "$identity_sha1" --keychain "$LOGIN_KEYCHAIN" --requirements "=$DESIGNATED_REQUIREMENT" "$APP"'
