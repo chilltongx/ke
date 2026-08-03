@@ -175,6 +175,11 @@ expect_event "$SCENARIO_LOG" "codesign:--verify --deep --strict --test-requireme
 [[ -f "$SCENARIO_DEST/new-marker" ]] || fail 'successful install did not publish staged app'
 [[ ! -f "$SCENARIO_DEST/old-marker" ]] || fail 'successful install kept old app contents'
 
+run_install no_process
+[[ "$SCENARIO_STATUS" -eq 0 ]] || fail "no-process install exited $SCENARIO_STATUS"
+expect_no_event "$SCENARIO_LOG" 'kill:'
+[[ -f "$SCENARIO_DEST/new-marker" ]] || fail 'no-process install did not publish staged app'
+
 run_install owned_stuck
 [[ "$SCENARIO_STATUS" -eq 75 ]] || fail "stuck owned process must exit 75, got $SCENARIO_STATUS"
 [[ -f "$SCENARIO_DEST/old-marker" ]] || fail 'stuck process replaced working install'

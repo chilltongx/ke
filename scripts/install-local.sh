@@ -113,8 +113,8 @@ stop_running_app() {
   local -a pids
   local pid attempt still_running output
   output="$(owned_app_pids)" || return $?
+  [[ -z "$output" ]] && return 0
   pids=("${(@f)output}")
-  (( ${#pids} == 0 )) && return 0
   for pid in "${pids[@]}"; do
     "$KILL" -TERM "$pid"
   done
