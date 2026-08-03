@@ -49,6 +49,7 @@ final class ManualApprovalController {
             } catch is CancellationError {
                 return
             } catch {
+                NSLog("Codex Quick OK send failed: %@", String(describing: error))
                 let message = (error as? LocalizedError)?.errorDescription
                     ?? "发送失败，请检查 Codex"
                 guard attemptID == currentAttempt else { return }

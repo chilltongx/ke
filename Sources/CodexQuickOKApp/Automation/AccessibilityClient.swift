@@ -132,6 +132,16 @@ final class AccessibilityClient: AccessibilityControlling {
         let sendButtonIndex: Int
     }
 
+    struct ComposerSelection: Equatable {
+        let composerIndex: Int
+        let sendButtonIndex: Int?
+
+        init(composerIndex: Int, sendButtonIndex: Int? = nil) {
+            self.composerIndex = composerIndex
+            self.sendButtonIndex = sendButtonIndex
+        }
+    }
+
     static let maximumElementCount = 5_000
     private static let codexBundleIdentifier = "com.openai.codex"
 
@@ -208,33 +218,48 @@ final class AccessibilityClient: AccessibilityControlling {
     }
 
     func composerValue() throws -> String {
-        try revalidateFocusedConversation()
-        guard let composer else {
-            throw AXError.composerMissing
+        let summaries = try refreshFocusedConversationComposer()
+        guard let composer else { throw AXError.composerMissing }
+        let value = try system.composerValue(of: composer)
+        guard summaries.sendButton?.enabled != true,
+              let description = summaries.composer.description,
+              !description.isEmpty,
+              value == "\n\(description)"
+        else {
+            return value
         }
-        return try system.composerValue(of: composer)
+        return ""
     }
 
     func setComposerValue(_ value: String) throws {
         try revalidateFocusedConversation()
-        guard let composer, sendButton != nil else {
+        guard let composer else {
             throw AXError.composerMissing
         }
         try system.setComposerValue(value, on: composer)
     }
 
     func waitUntilSendEnabled(timeout: TimeInterval) async throws {
-        guard let sendButton else {
-            throw AXError.sendActionMissing
-        }
         let maximumSleeps = max(0, Int(ceil(max(0, timeout) / pollInterval)))
         for attempt in 0...maximumSleeps {
-            try revalidateFocusedConversation()
-            let summary = try system.summary(of: sendButton, parentIndex: nil)
-            guard Self.isSendButton(summary) else {
-                throw AXError.sendActionMissing
+            do {
+                try refreshFocusedConversationControls()
+                guard let sendButton else {
+                    throw AXError.sendActionMissing
+                }
+                let summary = try system.summary(of: sendButton, parentIndex: nil)
+                guard Self.isSendButton(summary) else {
+                    throw AXError.sendActionMissing
+                }
+                if summary.enabled { return }
+            } catch let error as AXError {
+                switch error {
+                case .taskNotFound, .composerMissing, .sendActionMissing:
+                    break
+                default:
+                    throw error
+                }
             }
-            if summary.enabled { return }
             guard attempt < maximumSleeps else { break }
             try await system.sleep(for: pollInterval)
         }
@@ -265,6 +290,19 @@ final class AccessibilityClient: AccessibilityControlling {
         }
     }
 
+    static func mergedChildren(
+        regular: [AnyObject],
+        navigationOrder: [AnyObject],
+        areEqual: (AnyObject, AnyObject) -> Bool
+    ) -> [AnyObject] {
+        navigationOrder.reduce(into: regular) { result, candidate in
+            guard !result.contains(where: { areEqual($0, candidate) }) else {
+                return
+            }
+            result.append(candidate)
+        }
+    }
+
     static func validatedSummary(
         parentIndex: Int?,
         role: AttributeRead,
@@ -276,9 +314,17 @@ final class AccessibilityClient: AccessibilityControlling {
         valueSettable: AttributeRead
     ) throws -> ElementSummary {
         guard let role = try requiredString(role),
-              let enabled = try requiredBool(enabled),
               let valueSettable = try requiredBool(valueSettable)
         else {
+            throw AXError.invalidAccessibilityTree
+        }
+        let enabled = try optionalBool(enabled)
+        let requiresEnabled = [
+            kAXTextAreaRole as String,
+            kAXTextFieldRole as String,
+            kAXButtonRole as String,
+        ].contains(role)
+        guard !requiresEnabled || enabled != nil else {
             throw AXError.invalidAccessibilityTree
         }
         return ElementSummary(
@@ -288,16 +334,26 @@ final class AccessibilityClient: AccessibilityControlling {
             title: try optionalString(title),
             description: try optionalString(description),
             value: try optionalString(value),
-            enabled: enabled,
+            enabled: enabled ?? false,
             valueSettable: valueSettable
         )
     }
 
     static func selectControls(in elements: [ElementSummary]) throws -> ControlSelection {
+        let composer = try selectComposer(in: elements)
+        guard let sendButtonIndex = composer.sendButtonIndex else {
+            throw AXError.sendActionMissing
+        }
+        return ControlSelection(
+            composerIndex: composer.composerIndex,
+            sendButtonIndex: sendButtonIndex
+        )
+    }
+
+    static func selectComposer(in elements: [ElementSummary]) throws -> ComposerSelection {
         if elements.contains(where: isNativeApprovalControl) {
             throw AXError.nativeApprovalCard
         }
-
         let composerIndices = elements.indices.filter { index in
             let element = elements[index]
             return [kAXTextAreaRole as String, kAXTextFieldRole as String]
@@ -308,16 +364,15 @@ final class AccessibilityClient: AccessibilityControlling {
         guard composerIndices.count == 1 else {
             throw composerIndices.isEmpty ? AXError.composerMissing : AXError.ambiguousTask
         }
-
         let sendButtonIndices = elements.indices.filter { index in
             Self.isSendButton(elements[index])
         }
-        guard sendButtonIndices.count == 1 else {
-            throw AXError.sendActionMissing
+        guard sendButtonIndices.count <= 1 else {
+            throw AXError.ambiguousTask
         }
-        return ControlSelection(
+        return ComposerSelection(
             composerIndex: composerIndices[0],
-            sendButtonIndex: sendButtonIndices[0]
+            sendButtonIndex: sendButtonIndices.first
         )
     }
 
@@ -363,6 +418,48 @@ final class AccessibilityClient: AccessibilityControlling {
         return owner.selection
     }
 
+    static func selectFocusedConversationComposer(
+        in elements: [ElementSummary]
+    ) throws -> ComposerSelection {
+        guard !elements.isEmpty, hasValidHierarchy(elements) else {
+            throw AXError.ambiguousTask
+        }
+        let mainRoots = elements.indices.filter {
+            elements[$0].subrole == kAXLandmarkMainSubrole as String
+        }
+        var owners: [(root: Int, selection: ComposerSelection)] = []
+        for root in mainRoots {
+            let indices = subtreeIndices(root: root, in: elements)
+            do {
+                let local = try selectComposer(in: indices.map { elements[$0] })
+                owners.append((
+                    root: root,
+                    selection: .init(
+                        composerIndex: indices[local.composerIndex],
+                        sendButtonIndex: local.sendButtonIndex.map { indices[$0] }
+                    )
+                ))
+            } catch let error as AXError {
+                switch error {
+                case .composerMissing:
+                    continue
+                default:
+                    throw error
+                }
+            }
+        }
+        let deepest = owners.filter { candidate in
+            !owners.contains { other in
+                other.root != candidate.root
+                    && isDescendant(other.root, of: candidate.root, in: elements)
+            }
+        }
+        guard deepest.count == 1, let owner = deepest.first else {
+            throw deepest.isEmpty ? AXError.composerMissing : AXError.ambiguousTask
+        }
+        return owner.selection
+    }
+
     static func validatedComposerValue(
         attributeReadSucceeded: Bool,
         value: Any?
@@ -389,13 +486,13 @@ final class AccessibilityClient: AccessibilityControlling {
             do {
                 try verifyCurrentPID(pid)
                 let tree = try elementTree(pid: pid)
-                let selection = try Self.selectFocusedConversationControls(
+                let selection = try Self.selectFocusedConversationComposer(
                     in: tree.summaries
                 )
                 targetPID = pid
                 targetWindow = tree.elements[0]
                 composer = tree.elements[selection.composerIndex]
-                sendButton = tree.elements[selection.sendButtonIndex]
+                sendButton = selection.sendButtonIndex.map { tree.elements[$0] }
                 return
             } catch let error as AXError {
                 switch error {
@@ -409,6 +506,46 @@ final class AccessibilityClient: AccessibilityControlling {
             try await system.sleep(for: pollInterval)
         }
         throw AXError.taskNotFound
+    }
+
+    private func refreshFocusedConversationControls() throws {
+        try revalidateFocusedConversation()
+        guard let targetPID, let targetWindow else {
+            throw AXError.taskNotFound
+        }
+        let tree = try elementTree(pid: targetPID)
+        guard system.elementsAreEqual(tree.elements[0], targetWindow) else {
+            throw AXError.targetApplicationChanged
+        }
+        let selection = try Self.selectFocusedConversationControls(
+            in: tree.summaries
+        )
+        composer = tree.elements[selection.composerIndex]
+        sendButton = tree.elements[selection.sendButtonIndex]
+    }
+
+    @discardableResult
+    private func refreshFocusedConversationComposer() throws -> (
+        composer: ElementSummary,
+        sendButton: ElementSummary?
+    ) {
+        try revalidateFocusedConversation()
+        guard let targetPID, let targetWindow else {
+            throw AXError.taskNotFound
+        }
+        let tree = try elementTree(pid: targetPID)
+        guard system.elementsAreEqual(tree.elements[0], targetWindow) else {
+            throw AXError.targetApplicationChanged
+        }
+        let selection = try Self.selectFocusedConversationComposer(
+            in: tree.summaries
+        )
+        composer = tree.elements[selection.composerIndex]
+        sendButton = selection.sendButtonIndex.map { tree.elements[$0] }
+        return (
+            composer: tree.summaries[selection.composerIndex],
+            sendButton: selection.sendButtonIndex.map { tree.summaries[$0] }
+        )
     }
 
     private func verifyCurrentPID(_ pid: pid_t) throws {
@@ -462,6 +599,20 @@ final class AccessibilityClient: AccessibilityControlling {
         return bool
     }
 
+    private static func optionalBool(_ read: AttributeRead) throws -> Bool? {
+        switch read {
+        case .absent:
+            return nil
+        case .failure:
+            throw AXError.invalidAccessibilityTree
+        case .value(let value):
+            guard let bool = value as? Bool else {
+                throw AXError.invalidAccessibilityTree
+            }
+            return bool
+        }
+    }
+
     private static func optionalString(_ read: AttributeRead) throws -> String? {
         switch read {
         case .absent:
@@ -493,7 +644,7 @@ final class AccessibilityClient: AccessibilityControlling {
         let labels = [element.title, element.description]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
         return labels.contains(where: {
-            ["send", "send message", "发送", "发送消息"].contains($0)
+            ["send", "send message", "发送", "发送消息", "加入队列"].contains($0)
         })
     }
 
@@ -572,8 +723,20 @@ private final class SystemAccessibilityProvider: AccessibilitySystemProviding {
     }
 
     func children(of element: AnyObject) throws -> [AnyObject] {
-        try AccessibilityClient.validatedChildren(
-            readAttribute(axElement(element), kAXChildrenAttribute as CFString)
+        let element = axElement(element)
+        let regularRead = readAttribute(element, kAXChildrenAttribute as CFString)
+        let navigationRead = readAttribute(
+            element,
+            "AXChildrenInNavigationOrder" as CFString
+        )
+        let regular: [AnyObject]
+        let navigationOrder: [AnyObject]
+        regular = try AccessibilityClient.validatedChildren(regularRead)
+        navigationOrder = try AccessibilityClient.validatedChildren(navigationRead)
+        return AccessibilityClient.mergedChildren(
+            regular: regular,
+            navigationOrder: navigationOrder,
+            areEqual: { CFEqual(self.axElement($0), self.axElement($1)) }
         )
     }
 
@@ -588,27 +751,34 @@ private final class SystemAccessibilityProvider: AccessibilitySystemProviding {
             kAXValueAttribute as CFString,
             &settable
         )
+        let role = readAttribute(element, kAXRoleAttribute as CFString)
+        let subrole = readAttribute(element, kAXSubroleAttribute as CFString)
+        let title = readAttribute(element, kAXTitleAttribute as CFString)
+        let description = readAttribute(element, kAXDescriptionAttribute as CFString)
+        let enabled = readAttribute(element, kAXEnabledAttribute as CFString)
+        let settableRead = valueSettableRead(
+            result: settableResult,
+            value: settable.boolValue
+        )
         return try AccessibilityClient.validatedSummary(
             parentIndex: parentIndex,
-            role: readAttribute(element, kAXRoleAttribute as CFString),
-            subrole: readAttribute(element, kAXSubroleAttribute as CFString),
-            title: readAttribute(element, kAXTitleAttribute as CFString),
-            description: readAttribute(element, kAXDescriptionAttribute as CFString),
+            role: role,
+            subrole: subrole,
+            title: title,
+            description: description,
             // AXValue is heterogeneous across the tree and is not used for
             // control selection. The selected composer is read strictly later.
             value: .absent,
-            enabled: readAttribute(element, kAXEnabledAttribute as CFString),
-            valueSettable: valueSettableRead(
-                result: settableResult,
-                value: settable.boolValue
-            )
+            enabled: enabled,
+            valueSettable: settableRead
         )
     }
 
     func composerValue(of element: AnyObject) throws -> String {
+        let element = axElement(element)
         var value: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(
-            axElement(element),
+            element,
             kAXValueAttribute as CFString,
             &value
         )
@@ -619,13 +789,75 @@ private final class SystemAccessibilityProvider: AccessibilitySystemProviding {
     }
 
     func setComposerValue(_ value: String, on element: AnyObject) throws {
-        guard AXUIElementSetAttributeValue(
-            axElement(element),
-            kAXValueAttribute as CFString,
-            value as CFString
-        ) == .success else {
+        let element = axElement(element)
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success,
+              pid > 0,
+              AXUIElementSetAttributeValue(
+                  element,
+                  kAXFocusedAttribute as CFString,
+                  kCFBooleanTrue
+              ) == .success,
+              let source = CGEventSource(stateID: .hidSystemState),
+              let selectAllDown = CGEvent(
+                  keyboardEventSource: source,
+                  virtualKey: 0,
+                  keyDown: true
+              ),
+              let selectAllUp = CGEvent(
+                  keyboardEventSource: source,
+                  virtualKey: 0,
+                  keyDown: false
+              )
+        else {
             throw AccessibilityClient.AXError.composerMissing
         }
+        selectAllDown.flags = .maskCommand
+        selectAllUp.flags = .maskCommand
+        selectAllDown.postToPid(pid)
+        selectAllUp.postToPid(pid)
+
+        if value.isEmpty {
+            guard let deleteDown = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: 51,
+                keyDown: true
+            ),
+                let deleteUp = CGEvent(
+                    keyboardEventSource: source,
+                    virtualKey: 51,
+                    keyDown: false
+                )
+            else {
+                throw AccessibilityClient.AXError.composerMissing
+            }
+            deleteDown.postToPid(pid)
+            deleteUp.postToPid(pid)
+            return
+        }
+
+        guard let valueDown = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: 0,
+            keyDown: true
+        ),
+            let valueUp = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: 0,
+                keyDown: false
+            )
+        else {
+            throw AccessibilityClient.AXError.composerMissing
+        }
+        let utf16 = Array(value.utf16)
+        utf16.withUnsafeBufferPointer { buffer in
+            valueDown.keyboardSetUnicodeString(
+                stringLength: buffer.count,
+                unicodeString: buffer.baseAddress
+            )
+        }
+        valueDown.postToPid(pid)
+        valueUp.postToPid(pid)
     }
 
     func press(_ element: AnyObject) throws {

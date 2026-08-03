@@ -6,6 +6,21 @@ import XCTest
 
 @MainActor
 final class AccessibilityClientTests: XCTestCase {
+    func testMergesNavigationOrderChildrenMissingFromRegularTree() {
+        let shell = NSObject()
+        let webArea = NSObject()
+
+        let children = AccessibilityClient.mergedChildren(
+            regular: [shell],
+            navigationOrder: [shell, webArea],
+            areEqual: { $0 === $1 }
+        )
+
+        XCTAssertEqual(children.count, 2)
+        XCTAssertTrue(children[0] === shell)
+        XCTAssertTrue(children[1] === webArea)
+    }
+
     func testSelectsComposerInsideOnlyDeepestMainRegion() throws {
         let elements = [
             summary(parent: nil, role: "AXWindow"),
@@ -19,6 +34,27 @@ final class AccessibilityClientTests: XCTestCase {
             try AccessibilityClient.selectFocusedConversationControls(in: elements),
             .init(composerIndex: 3, sendButtonIndex: 4)
         )
+    }
+
+    func testSelectsEnabledQueueActionAsSendControl() throws {
+        let controls = try AccessibilityClient.selectControls(in: [
+            summary(
+                parent: nil,
+                role: "AXTextArea",
+                enabled: true,
+                valueSettable: true
+            ),
+            .init(
+                role: "AXButton",
+                title: "",
+                description: "加入队列",
+                enabled: true,
+                valueSettable: false
+            ),
+        ])
+
+        XCTAssertEqual(controls.composerIndex, 0)
+        XCTAssertEqual(controls.sendButtonIndex, 1)
     }
 
     func testRejectsTwoMainRegionsWithComposers() {
@@ -125,6 +161,40 @@ final class AccessibilityClientTests: XCTestCase {
         }
     }
 
+    func testContainerMayOmitEnabledButInteractiveControlMayNot() throws {
+        let container = try AccessibilityClient.validatedSummary(
+            parentIndex: nil,
+            role: .value("AXGroup"),
+            subrole: .absent,
+            title: .absent,
+            description: .absent,
+            value: .absent,
+            enabled: .absent,
+            valueSettable: .value(false)
+        )
+
+        XCTAssertEqual(container.role, "AXGroup")
+        XCTAssertFalse(container.enabled)
+
+        XCTAssertThrowsError(
+            try AccessibilityClient.validatedSummary(
+                parentIndex: nil,
+                role: .value("AXButton"),
+                subrole: .absent,
+                title: .value("Send"),
+                description: .absent,
+                value: .absent,
+                enabled: .absent,
+                valueSettable: .value(false)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .invalidAccessibilityTree
+            )
+        }
+    }
+
     func testSummaryReadFailureAndNodeLimitFailClosedWithoutPartialSelection() async {
         let invalid = FakeAccessibilitySystem.validConversation(pid: 42)
         invalid.summaryErrorNode = invalid.sendButton
@@ -209,6 +279,39 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertEqual(system.writtenValues, ["可"])
         XCTAssertEqual(system.sleepCount, 2)
         XCTAssertEqual(system.pressCount, 1)
+    }
+
+    func testSendMayAppearOnlyAfterComposerWrite() async throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 721)
+        system.setSendPresent(false)
+        let client = AccessibilityClient(system: system, pollInterval: 0.01)
+
+        try await client.prepareFocusedConversation(timeout: 0.02)
+        try client.setComposerValue("可")
+        system.setSendPresent(true)
+        try await client.waitUntilSendEnabled(timeout: 0.02)
+        try client.pressSend()
+
+        XCTAssertEqual(system.writtenValues, ["可"])
+        XCTAssertEqual(system.pressCount, 1)
+    }
+
+    func testPlaceholderArtifactIsEmptyOnlyWhileSendControlIsUnavailable() async throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 722)
+        system.storedComposerValue = "\n随心输入"
+        system.setComposerDescription("随心输入")
+        system.setSendPresent(false)
+        let client = AccessibilityClient(system: system)
+
+        try await client.prepareFocusedConversation(timeout: 0.02)
+        XCTAssertEqual(try client.composerValue(), "")
+
+        system.setSendPresent(true)
+        system.setSendEnabled(false)
+        XCTAssertEqual(try client.composerValue(), "")
+
+        system.setSendEnabled(true)
+        XCTAssertEqual(try client.composerValue(), "\n随心输入")
     }
 
     func testNeverEnabledSendTimesOutWithoutPressing() async throws {
@@ -308,6 +411,7 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
     private(set) var sleepCount = 0
     private(set) var writtenValues: [String] = []
     private(set) var pressCount = 0
+    var storedComposerValue = ""
 
     let root = Node()
     let alternateWindow = Node()
@@ -408,10 +512,13 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
         )
     }
 
-    func composerValue(of element: AnyObject) throws -> String { "" }
+    func composerValue(of element: AnyObject) throws -> String {
+        storedComposerValue
+    }
 
     func setComposerValue(_ value: String, on element: AnyObject) throws {
         writtenValues.append(value)
+        storedComposerValue = value
     }
 
     func press(_ element: AnyObject) throws {
@@ -436,10 +543,25 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
         )
     }
 
+    func setSendPresent(_ present: Bool) {
+        childrenByNode[ObjectIdentifier(main)] = present
+            ? [composer, sendButton]
+            : [composer]
+    }
+
+    func setComposerDescription(_ description: String?) {
+        summariesByNode[ObjectIdentifier(composer)] = makeSummary(
+            role: "AXTextArea",
+            description: description,
+            valueSettable: true
+        )
+    }
+
     private func makeSummary(
         role: String,
         subrole: String? = nil,
         title: String? = nil,
+        description: String? = nil,
         value: String? = nil,
         enabled: Bool = true,
         valueSettable: Bool = false
@@ -448,7 +570,7 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
             role: role,
             subrole: subrole,
             title: title,
-            description: nil,
+            description: description,
             value: value,
             enabled: enabled,
             valueSettable: valueSettable
