@@ -296,7 +296,7 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertEqual(system.pressCount, 1)
     }
 
-    func testPlaceholderArtifactIsEmptyOnlyWhileSendControlIsUnavailable() async throws {
+    func testPlaceholderArtifactIsEmptyRegardlessOfSendControlAvailability() async throws {
         let system = FakeAccessibilitySystem.validConversation(pid: 722)
         system.storedComposerValue = "\n随心输入"
         system.setComposerDescription("随心输入")
@@ -311,7 +311,7 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertEqual(try client.composerValue(), "")
 
         system.setSendEnabled(true)
-        XCTAssertEqual(try client.composerValue(), "\n随心输入")
+        XCTAssertEqual(try client.composerValue(), "")
     }
 
     func testNeverEnabledSendTimesOutWithoutPressing() async throws {

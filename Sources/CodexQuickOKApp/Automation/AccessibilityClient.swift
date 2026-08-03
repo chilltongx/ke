@@ -221,8 +221,7 @@ final class AccessibilityClient: AccessibilityControlling {
         let summaries = try refreshFocusedConversationComposer()
         guard let composer else { throw AXError.composerMissing }
         let value = try system.composerValue(of: composer)
-        guard summaries.sendButton?.enabled != true,
-              let description = summaries.composer.description,
+        guard let description = summaries.composer.description,
               !description.isEmpty,
               value == "\n\(description)"
         else {
