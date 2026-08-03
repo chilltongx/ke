@@ -41,3 +41,7 @@ TCC、登录项或 Codex 会话数据。
 ```bash
 zsh scripts/uninstall-local.sh
 ```
+
+## 许可证
+
+[MIT License](LICENSE)
