@@ -19,6 +19,7 @@ final class FocusedChatApprovalSenderTests: XCTestCase {
             "capture",
             "read",
             "revalidate",
+            "read",
             "write:可",
             "wait:可:0.5",
             "revalidate",
@@ -112,6 +113,25 @@ final class FocusedChatApprovalSenderTests: XCTestCase {
         }
     }
 
+    func testDraftAppearingAfterFirstValidationIsNotOverwritten() async {
+        let input = FakeFocusedInput(value: "")
+        input.valueAfterFirstRevalidation = "late draft"
+        let sender = FocusedChatApprovalSender(
+            input: input,
+            classifier: StubChatClassifier(match: .init(kind: .generic))
+        )
+
+        do {
+            try await sender.sendOK()
+            XCTFail("Expected late draft rejection")
+        } catch {
+            XCTAssertEqual(error as? FocusedChatSendError, .existingDraft)
+        }
+
+        XCTAssertFalse(input.events.contains { $0.hasPrefix("write:") })
+        XCTAssertEqual(input.returnCount, 0)
+    }
+
     func testWriteMismatchDoesNotReturn() async {
         let input = FakeFocusedInput(value: "")
         input.waitError = AccessibilityClient.AXError.insertedValueMismatch
@@ -200,6 +220,7 @@ private final class FakeFocusedInput: FocusedInputControlling {
     var waitError: Error?
     var returnError: Error?
     var waitGate: (() async throws -> Void)?
+    var valueAfterFirstRevalidation: String?
     private(set) var returnAttempts = 0
     private(set) var returnCount = 0
     private var revalidationCount = 0
@@ -233,6 +254,9 @@ private final class FakeFocusedInput: FocusedInputControlling {
     func revalidate(_ target: FocusedTargetSnapshot) throws {
         revalidationCount += 1
         events.append("revalidate")
+        if revalidationCount == 1, let valueAfterFirstRevalidation {
+            value = valueAfterFirstRevalidation
+        }
         if failRevalidation == revalidationCount {
             throw AccessibilityClient.AXError.targetChanged
         }

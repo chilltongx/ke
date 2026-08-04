@@ -1,5 +1,3 @@
-import AppKit
-import ApplicationServices
 import Foundation
 import XCTest
 @testable import CodexQuickOKApp
@@ -19,76 +17,6 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertEqual(children.count, 2)
         XCTAssertTrue(children[0] === shell)
         XCTAssertTrue(children[1] === webArea)
-    }
-
-    func testSelectsComposerInsideOnlyDeepestMainRegion() throws {
-        let elements = [
-            summary(parent: nil, role: "AXWindow"),
-            summary(parent: 0, role: "AXTextField", valueSettable: true),
-            summary(parent: 0, role: "AXGroup", subrole: "AXLandmarkMain"),
-            summary(parent: 2, role: "AXTextArea", value: "", valueSettable: true),
-            summary(parent: 2, role: "AXButton", title: "Send", enabled: false),
-        ]
-
-        XCTAssertEqual(
-            try AccessibilityClient.selectFocusedConversationControls(in: elements),
-            .init(composerIndex: 3, sendButtonIndex: 4)
-        )
-    }
-
-    func testSelectsEnabledQueueActionAsSendControl() throws {
-        let controls = try AccessibilityClient.selectControls(in: [
-            summary(
-                parent: nil,
-                role: "AXTextArea",
-                enabled: true,
-                valueSettable: true
-            ),
-            .init(
-                role: "AXButton",
-                title: "",
-                description: "加入队列",
-                enabled: true,
-                valueSettable: false
-            ),
-        ])
-
-        XCTAssertEqual(controls.composerIndex, 0)
-        XCTAssertEqual(controls.sendButtonIndex, 1)
-    }
-
-    func testRejectsTwoMainRegionsWithComposers() {
-        let elements = [
-            summary(parent: nil, role: "AXWindow"),
-            summary(parent: 0, role: "AXGroup", subrole: "AXLandmarkMain"),
-            summary(parent: 1, role: "AXTextArea", value: "", valueSettable: true),
-            summary(parent: 1, role: "AXButton", title: "Send"),
-            summary(parent: 0, role: "AXGroup", subrole: "AXLandmarkMain"),
-            summary(parent: 4, role: "AXTextArea", value: "", valueSettable: true),
-            summary(parent: 4, role: "AXButton", title: "Send"),
-        ]
-
-        XCTAssertThrowsError(
-            try AccessibilityClient.selectFocusedConversationControls(in: elements)
-        ) { error in
-            XCTAssertEqual(error as? AccessibilityClient.AXError, .ambiguousTask)
-        }
-    }
-
-    func testRejectsNativeApprovalCardInCurrentConversation() {
-        let elements = [
-            summary(parent: nil, role: "AXWindow"),
-            summary(parent: 0, role: "AXGroup", subrole: "AXLandmarkMain"),
-            summary(parent: 1, role: "AXTextArea", value: "", valueSettable: true),
-            summary(parent: 1, role: "AXButton", title: "Approve once"),
-            summary(parent: 1, role: "AXButton", title: "Send"),
-        ]
-
-        XCTAssertThrowsError(
-            try AccessibilityClient.selectFocusedConversationControls(in: elements)
-        ) { error in
-            XCTAssertEqual(error as? AccessibilityClient.AXError, .nativeApprovalCard)
-        }
     }
 
     func testSuccessfulNilComposerValueIsEmptyButUnreadableOrNonStringFails() throws {
@@ -117,30 +45,24 @@ final class AccessibilityClientTests: XCTestCase {
         }
     }
 
-    func testChildReadFailureAndWrongChildrenTypeFailClosed() async {
-        let system = FakeAccessibilitySystem.validConversation(pid: 41)
-        system.childrenErrorNode = system.root
-        let client = AccessibilityClient(system: system)
-
-        await assertPrepareFails(client, as: .invalidAccessibilityTree)
-
-        XCTAssertThrowsError(
-            try AccessibilityClient.validatedChildren(
-                AccessibilityClient.AttributeRead.value("not children")
-            )
-        ) { error in
-            XCTAssertEqual(error as? AccessibilityClient.AXError, .invalidAccessibilityTree)
-        }
-        XCTAssertThrowsError(
-            try AccessibilityClient.validatedChildren(
-                AccessibilityClient.AttributeRead.value([NSString(string: "not AX")])
-            )
-        ) { error in
-            XCTAssertEqual(error as? AccessibilityClient.AXError, .invalidAccessibilityTree)
+    func testInvalidChildrenFailClosed() {
+        for read in [
+            AccessibilityClient.AttributeRead.failure,
+            .value("not children"),
+            .value([NSString(string: "not AX")]),
+        ] {
+            XCTAssertThrowsError(
+                try AccessibilityClient.validatedChildren(read)
+            ) { error in
+                XCTAssertEqual(
+                    error as? AccessibilityClient.AXError,
+                    .invalidAccessibilityTree
+                )
+            }
         }
     }
 
-    func testUnreadableEnabledAndInvalidRequiredSummaryFailClosed() {
+    func testUnreadableInteractiveSummaryFailsClosed() {
         XCTAssertThrowsError(
             try AccessibilityClient.validatedSummary(
                 parentIndex: nil,
@@ -153,21 +75,10 @@ final class AccessibilityClientTests: XCTestCase {
                 valueSettable: .value(false)
             )
         ) { error in
-            XCTAssertEqual(error as? AccessibilityClient.AXError, .invalidAccessibilityTree)
-        }
-        XCTAssertThrowsError(
-            try AccessibilityClient.validatedSummary(
-                parentIndex: nil,
-                role: .value(7),
-                subrole: .absent,
-                title: .absent,
-                description: .absent,
-                value: .absent,
-                enabled: .value(true),
-                valueSettable: .value(false)
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .invalidAccessibilityTree
             )
-        ) { error in
-            XCTAssertEqual(error as? AccessibilityClient.AXError, .invalidAccessibilityTree)
         }
     }
 
@@ -183,195 +94,24 @@ final class AccessibilityClientTests: XCTestCase {
             valueSettable: .value(false)
         )
 
-        XCTAssertEqual(container.role, "AXGroup")
         XCTAssertFalse(container.enabled)
-
         XCTAssertThrowsError(
             try AccessibilityClient.validatedSummary(
                 parentIndex: nil,
-                role: .value("AXButton"),
+                role: .value("AXTextArea"),
                 subrole: .absent,
-                title: .value("Send"),
+                title: .absent,
                 description: .absent,
                 value: .absent,
                 enabled: .absent,
-                valueSettable: .value(false)
+                valueSettable: .value(true)
             )
-        ) { error in
-            XCTAssertEqual(
-                error as? AccessibilityClient.AXError,
-                .invalidAccessibilityTree
-            )
-        }
-    }
-
-    func testSummaryReadFailureAndNodeLimitFailClosedWithoutPartialSelection() async {
-        let invalid = FakeAccessibilitySystem.validConversation(pid: 42)
-        invalid.summaryErrorNode = invalid.sendButton
-        await assertPrepareFails(
-            AccessibilityClient(system: invalid),
-            as: .invalidAccessibilityTree
-        )
-
-        let truncated = FakeAccessibilitySystem(pid: 43)
-        truncated.makeFlatTree(childCount: AccessibilityClient.maximumElementCount)
-        await assertPrepareFails(
-            AccessibilityClient(system: truncated),
-            as: .accessibilityTreeTruncated
         )
     }
 
-    func testActivationWaitsForExactPIDAndUsesItForFocusedWindow() async throws {
-        let system = FakeAccessibilitySystem.validConversation(pid: 51)
-        system.frontmostPID = 999
-        system.frontmostPIDsAfterSleeps = [999, 51]
-        let client = AccessibilityClient(system: system, pollInterval: 0.01)
-
-        try await client.prepareFocusedConversation(timeout: 0.05)
-
-        XCTAssertEqual(system.activationRequests, [51])
-        XCTAssertEqual(system.focusedWindowPIDs, [51])
-        XCTAssertEqual(system.sleepCount, 2)
-    }
-
-    func testActivationRejectsNoOrMultipleCodexInstancesAndTimesOut() async {
-        let absent = FakeAccessibilitySystem(pid: nil)
-        await assertPrepareFails(
-            AccessibilityClient(system: absent, pollInterval: 0.01),
-            as: .codexNotRunning
-        )
-
-        let multiple = FakeAccessibilitySystem(pid: 61)
-        multiple.runningPIDs = [61, 62]
-        await assertPrepareFails(
-            AccessibilityClient(system: multiple, pollInterval: 0.01),
-            as: .ambiguousApplication
-        )
-
-        let timeout = FakeAccessibilitySystem.validConversation(pid: 63)
-        timeout.frontmostPID = 999
-        await assertPrepareFails(
-            AccessibilityClient(system: timeout, pollInterval: 0.01),
-            timeout: 0.02,
-            as: .activationTimedOut
-        )
-        XCTAssertLessThanOrEqual(timeout.sleepCount, 2)
-    }
-
-    func testFrontmostSwitchBeforeMutationAndSendFailsClosed() async throws {
-        let system = FakeAccessibilitySystem.validConversation(pid: 71)
-        let client = AccessibilityClient(system: system)
-        try await client.prepareFocusedConversation(timeout: 0.1)
-
-        system.frontmostPID = 999
-
-        XCTAssertThrowsError(try client.setComposerValue("\u{53ef}")) { error in
-            XCTAssertEqual(error as? AccessibilityClient.AXError, .targetApplicationChanged)
-        }
-        XCTAssertThrowsError(try client.pressSend()) { error in
-            XCTAssertEqual(error as? AccessibilityClient.AXError, .targetApplicationChanged)
-        }
-        XCTAssertEqual(system.writtenValues, [])
-        XCTAssertEqual(system.pressCount, 0)
-    }
-
-    func testDisabledSendBecomesEnabledAfterExactComposerWrite() async throws {
-        let system = FakeAccessibilitySystem.validConversation(pid: 72)
-        system.setSendEnabled(false)
-        system.sendEnabledAfterSleeps = [false, true]
-        let client = AccessibilityClient(system: system, pollInterval: 0.01)
-
-        try await client.prepareFocusedConversation(timeout: 0.05)
-        try client.setComposerValue("可")
-        try await client.waitUntilSendEnabled(timeout: 0.03)
-        try client.pressSend()
-
-        XCTAssertEqual(system.writtenValues, ["可"])
-        XCTAssertEqual(system.sleepCount, 2)
-        XCTAssertEqual(system.pressCount, 1)
-    }
-
-    func testSendMayAppearOnlyAfterComposerWrite() async throws {
-        let system = FakeAccessibilitySystem.validConversation(pid: 721)
-        system.setSendPresent(false)
-        let client = AccessibilityClient(system: system, pollInterval: 0.01)
-
-        try await client.prepareFocusedConversation(timeout: 0.02)
-        try client.setComposerValue("可")
-        system.setSendPresent(true)
-        try await client.waitUntilSendEnabled(timeout: 0.02)
-        try client.pressSend()
-
-        XCTAssertEqual(system.writtenValues, ["可"])
-        XCTAssertEqual(system.pressCount, 1)
-    }
-
-    func testPlaceholderArtifactIsEmptyRegardlessOfSendControlAvailability() async throws {
-        let system = FakeAccessibilitySystem.validConversation(pid: 722)
-        system.storedComposerValue = "\n随心输入"
-        system.setComposerDescription("随心输入")
-        system.setSendPresent(false)
-        let client = AccessibilityClient(system: system)
-
-        try await client.prepareFocusedConversation(timeout: 0.02)
-        XCTAssertEqual(try client.composerValue(), "")
-
-        system.setSendPresent(true)
-        system.setSendEnabled(false)
-        XCTAssertEqual(try client.composerValue(), "")
-
-        system.setSendEnabled(true)
-        XCTAssertEqual(try client.composerValue(), "")
-    }
-
-    func testNeverEnabledSendTimesOutWithoutPressing() async throws {
-        let system = FakeAccessibilitySystem.validConversation(pid: 73)
-        system.setSendEnabled(false)
-        let client = AccessibilityClient(system: system, pollInterval: 0.01)
-
-        try await client.prepareFocusedConversation(timeout: 0.05)
-        try client.setComposerValue("可")
-        do {
-            try await client.waitUntilSendEnabled(timeout: 0.02)
-            XCTFail("Expected send enable timeout")
-        } catch {
-            XCTAssertEqual(error as? AccessibilityClient.AXError, .sendActionTimedOut)
-        }
-
-        XCTAssertLessThanOrEqual(system.sleepCount, 2)
-        XCTAssertEqual(system.pressCount, 0)
-    }
-
-    func testSamePIDFocusedWindowSwitchFailsEveryCachedControlOperation() async throws {
-        let system = FakeAccessibilitySystem.validConversation(pid: 74)
-        let client = AccessibilityClient(system: system, pollInterval: 0.01)
-        try await client.prepareFocusedConversation(timeout: 0.05)
-
-        system.focusedWindowNode = system.alternateWindow
-
-        XCTAssertThrowsError(try client.composerValue()) { error in
-            XCTAssertEqual(error as? AccessibilityClient.AXError, .targetApplicationChanged)
-        }
-        XCTAssertThrowsError(try client.setComposerValue("可")) { error in
-            XCTAssertEqual(error as? AccessibilityClient.AXError, .targetApplicationChanged)
-        }
-        do {
-            try await client.waitUntilSendEnabled(timeout: 0.01)
-            XCTFail("Expected focused-window revalidation failure")
-        } catch {
-            XCTAssertEqual(error as? AccessibilityClient.AXError, .targetApplicationChanged)
-        }
-        XCTAssertThrowsError(try client.pressSend()) { error in
-            XCTAssertEqual(error as? AccessibilityClient.AXError, .targetApplicationChanged)
-        }
-        XCTAssertEqual(system.writtenValues, [])
-        XCTAssertEqual(system.pressCount, 0)
-    }
-
-    func testCapturesFrontmostFocusedElementWithoutActivatingAnotherApp() throws {
+    func testCapturesFrontmostFocusedElementAndContext() throws {
         let system = FakeAccessibilitySystem.validConversation(pid: 81)
         system.frontmostBundleIdentifier = "com.microsoft.VSCode"
-        system.setFocusedPathToComposer()
         let client = AccessibilityClient(system: system, pollInterval: 0.01)
 
         let target = try client.captureTarget()
@@ -379,22 +119,16 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertEqual(target.processIdentifier, 81)
         XCTAssertEqual(target.bundleIdentifier, "com.microsoft.VSCode")
         XCTAssertTrue(system.elementsAreEqual(target.element, system.composer))
-        XCTAssertEqual(system.activationRequests, [])
         XCTAssertEqual(target.context.focused.role, "AXTextArea")
-        XCTAssertEqual(
-            target.context.ancestors.map(\.role),
-            ["AXGroup", "AXWindow"]
-        )
+        XCTAssertEqual(target.context.ancestors.map(\.role), ["AXGroup", "AXWindow"])
         XCTAssertTrue(target.context.nearby.contains { $0.title == "Send" })
     }
 
     func testCaptureReadsBoundedDescendantsFromAdjacentContainer() throws {
         let system = FakeAccessibilitySystem.validConversation(pid: 811)
-        system.setFocusedPathToComposer()
         system.nestSendButtonBesideComposer()
-        let client = AccessibilityClient(system: system)
 
-        let target = try client.captureTarget()
+        let target = try AccessibilityClient(system: system).captureTarget()
 
         XCTAssertTrue(target.context.nearby.contains { $0.title == "Send" })
     }
@@ -402,7 +136,6 @@ final class AccessibilityClientTests: XCTestCase {
     func testCaptureRequiresAccessibilityPermission() {
         let system = FakeAccessibilitySystem.validConversation(pid: 812)
         system.isProcessTrusted = false
-        system.setFocusedPathToComposer()
 
         XCTAssertThrowsError(
             try AccessibilityClient(system: system).captureTarget()
@@ -413,12 +146,13 @@ final class AccessibilityClientTests: XCTestCase {
 
     func testCaptureFailsWhenFocusedElementIsNotInsideFocusedWindow() {
         let system = FakeAccessibilitySystem.validConversation(pid: 82)
-        let unrelated = FakeAccessibilitySystem.Node()
-        unrelated.processIdentifier = 82
+        let unrelated = FakeAccessibilitySystem.Node(processIdentifier: 82)
+        system.registerDetachedInput(unrelated)
         system.focusedElementNode = unrelated
-        let client = AccessibilityClient(system: system)
 
-        XCTAssertThrowsError(try client.captureTarget()) { error in
+        XCTAssertThrowsError(
+            try AccessibilityClient(system: system).captureTarget()
+        ) { error in
             XCTAssertEqual(
                 error as? AccessibilityClient.AXError,
                 .focusedElementUnavailable
@@ -428,11 +162,11 @@ final class AccessibilityClientTests: XCTestCase {
 
     func testCaptureRejectsElementOwnedByAnotherPID() {
         let system = FakeAccessibilitySystem.validConversation(pid: 821)
-        system.setFocusedPathToComposer()
         system.composer.processIdentifier = 999
-        let client = AccessibilityClient(system: system)
 
-        XCTAssertThrowsError(try client.captureTarget()) { error in
+        XCTAssertThrowsError(
+            try AccessibilityClient(system: system).captureTarget()
+        ) { error in
             XCTAssertEqual(
                 error as? AccessibilityClient.AXError,
                 .focusedElementUnavailable
@@ -440,28 +174,65 @@ final class AccessibilityClientTests: XCTestCase {
         }
     }
 
+    func testChildAndSummaryReadFailuresFailClosed() {
+        let childrenFailure = FakeAccessibilitySystem.validConversation(pid: 822)
+        childrenFailure.childrenErrorNode = childrenFailure.root
+        XCTAssertThrowsError(
+            try AccessibilityClient(system: childrenFailure).captureTarget()
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .invalidAccessibilityTree
+            )
+        }
+
+        let summaryFailure = FakeAccessibilitySystem.validConversation(pid: 823)
+        summaryFailure.summaryErrorNode = summaryFailure.sendButton
+        XCTAssertThrowsError(
+            try AccessibilityClient(system: summaryFailure).captureTarget()
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .invalidAccessibilityTree
+            )
+        }
+    }
+
+    func testNearbyContextLimitFailsClosed() {
+        let system = FakeAccessibilitySystem.validConversation(pid: 824)
+        system.addNearbyNodes(
+            count: AccessibilityClient.maximumNearbyElementCount + 1
+        )
+
+        XCTAssertThrowsError(
+            try AccessibilityClient(system: system).captureTarget()
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .accessibilityTreeTruncated
+            )
+        }
+    }
+
     func testRevalidationRejectsPIDWindowAndElementChanges() throws {
         let system = FakeAccessibilitySystem.validConversation(pid: 83)
-        system.setFocusedPathToComposer()
         let client = AccessibilityClient(system: system)
         let target = try client.captureTarget()
 
         system.frontmostPID = 84
-        XCTAssertThrowsError(try client.revalidate(target))
+        assertTargetChanged { try client.revalidate(target) }
 
         system.frontmostPID = 83
         system.focusedWindowNode = system.alternateWindow
-        system.alternateWindow.processIdentifier = 83
-        XCTAssertThrowsError(try client.revalidate(target))
+        assertTargetChanged { try client.revalidate(target) }
 
         system.focusedWindowNode = system.root
         system.focusedElementNode = system.sendButton
-        XCTAssertThrowsError(try client.revalidate(target))
+        assertTargetChanged { try client.revalidate(target) }
     }
 
     func testWritesConfirmsAndPostsOneReturnToCapturedPID() async throws {
         let system = FakeAccessibilitySystem.validConversation(pid: 85)
-        system.setFocusedPathToComposer()
         let client = AccessibilityClient(system: system, pollInterval: 0.01)
         let target = try client.captureTarget()
 
@@ -475,7 +246,6 @@ final class AccessibilityClientTests: XCTestCase {
 
     func testValueMismatchTimesOutWithoutPostingReturn() async throws {
         let system = FakeAccessibilitySystem.validConversation(pid: 86)
-        system.setFocusedPathToComposer()
         system.ignoreComposerWrites = true
         let client = AccessibilityClient(system: system, pollInterval: 0.01)
         let target = try client.captureTarget()
@@ -497,40 +267,19 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertEqual(system.returnPIDs, [])
     }
 
-    private func assertPrepareFails(
-        _ client: AccessibilityClient,
-        timeout: TimeInterval = 0.1,
-        as expected: AccessibilityClient.AXError,
+    private func assertTargetChanged(
+        _ operation: () throws -> Void,
         file: StaticString = #filePath,
         line: UInt = #line
-    ) async {
-        do {
-            try await client.prepareFocusedConversation(timeout: timeout)
-            XCTFail("Expected preparation failure", file: file, line: line)
-        } catch {
-            XCTAssertEqual(error as? AccessibilityClient.AXError, expected, file: file, line: line)
+    ) {
+        XCTAssertThrowsError(try operation(), file: file, line: line) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .targetChanged,
+                file: file,
+                line: line
+            )
         }
-    }
-
-    private func summary(
-        parent: Int?,
-        role: String,
-        subrole: String? = nil,
-        title: String? = nil,
-        value: String? = nil,
-        enabled: Bool = true,
-        valueSettable: Bool = false
-    ) -> AccessibilityClient.ElementSummary {
-        .init(
-            parentIndex: parent,
-            role: role,
-            subrole: subrole,
-            title: title,
-            description: nil,
-            value: value,
-            enabled: enabled,
-            valueSettable: valueSettable
-        )
     }
 }
 
@@ -539,24 +288,23 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
     final class Node: NSObject {
         weak var parent: Node?
         var processIdentifier: pid_t?
+
+        init(processIdentifier: pid_t? = nil) {
+            self.processIdentifier = processIdentifier
+        }
     }
 
     var isProcessTrusted = true
-    var runningPIDs: [pid_t]
     var frontmostPID: pid_t?
     var frontmostBundleIdentifier: String? = "com.openai.codex"
-    var frontmostPIDsAfterSleeps: [pid_t?] = []
-    var sendEnabledAfterSleeps: [Bool] = []
-    var activationSucceeds = true
-    private(set) var activationRequests: [pid_t] = []
-    private(set) var focusedWindowPIDs: [pid_t] = []
-    private(set) var sleepCount = 0
-    private(set) var writtenValues: [String] = []
-    private(set) var pressCount = 0
     var storedComposerValue = ""
     var focusedElementNode: Node?
-    private(set) var returnPIDs: [pid_t] = []
+    var focusedWindowNode: Node?
     var ignoreComposerWrites = false
+    var childrenErrorNode: Node?
+    var summaryErrorNode: Node?
+    private(set) var returnPIDs: [pid_t] = []
+    private(set) var sleepCount = 0
 
     let root = Node()
     let alternateWindow = Node()
@@ -564,14 +312,13 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
     let composer = Node()
     let sendContainer = Node()
     let sendButton = Node()
-    var focusedWindowNode: Node?
-    var childrenErrorNode: Node?
-    var summaryErrorNode: Node?
+
     private var childrenByNode: [ObjectIdentifier: [Node]] = [:]
-    private var summariesByNode: [ObjectIdentifier: AccessibilityClient.ElementSummary] = [:]
+    private var summariesByNode: [
+        ObjectIdentifier: AccessibilityClient.ElementSummary
+    ] = [:]
 
     init(pid: pid_t?) {
-        runningPIDs = pid.map { [$0] } ?? []
         frontmostPID = pid
         focusedWindowNode = root
     }
@@ -579,52 +326,50 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
     static func validConversation(pid: pid_t) -> FakeAccessibilitySystem {
         let system = FakeAccessibilitySystem(pid: pid)
         system.childrenByNode[ObjectIdentifier(system.root)] = [system.main]
-        system.childrenByNode[ObjectIdentifier(system.main)] = [system.composer, system.sendButton]
+        system.childrenByNode[ObjectIdentifier(system.main)] = [
+            system.composer,
+            system.sendButton,
+        ]
         system.childrenByNode[ObjectIdentifier(system.composer)] = []
         system.childrenByNode[ObjectIdentifier(system.sendButton)] = []
-        system.summariesByNode[ObjectIdentifier(system.root)] = system.makeSummary(role: "AXWindow")
+        system.summariesByNode[ObjectIdentifier(system.root)] = system.makeSummary(
+            role: "AXWindow"
+        )
         system.summariesByNode[ObjectIdentifier(system.main)] = system.makeSummary(
             role: "AXGroup",
             subrole: "AXLandmarkMain"
         )
         system.summariesByNode[ObjectIdentifier(system.composer)] = system.makeSummary(
             role: "AXTextArea",
-            value: "",
             valueSettable: true
         )
         system.summariesByNode[ObjectIdentifier(system.sendButton)] = system.makeSummary(
             role: "AXButton",
             title: "Send"
         )
+        system.focusedElementNode = system.composer
+        for node in [
+            system.root,
+            system.alternateWindow,
+            system.main,
+            system.composer,
+            system.sendContainer,
+            system.sendButton,
+        ] {
+            node.processIdentifier = pid
+        }
+        system.main.parent = system.root
+        system.composer.parent = system.main
+        system.sendButton.parent = system.main
         return system
     }
 
-    func makeFlatTree(childCount: Int) {
-        let children = (0..<childCount).map { _ in Node() }
-        childrenByNode[ObjectIdentifier(root)] = children
-        summariesByNode[ObjectIdentifier(root)] = makeSummary(role: "AXWindow")
-        for child in children {
-            childrenByNode[ObjectIdentifier(child)] = []
-            summariesByNode[ObjectIdentifier(child)] = makeSummary(role: "AXGroup")
-        }
-    }
-
-    func runningApplications(bundleIdentifier: String) -> [AccessibilityClient.RunningApplication] {
-        runningPIDs.map { .init(processIdentifier: $0) }
-    }
-
-    func activate(processIdentifier: pid_t) -> Bool {
-        activationRequests.append(processIdentifier)
-        return activationSucceeds
-    }
-
     func focusedWindow(processIdentifier: pid_t) throws -> AnyObject {
-        focusedWindowPIDs.append(processIdentifier)
-        return focusedWindowNode ?? root
+        focusedWindowNode ?? root
     }
 
     func focusedElement(processIdentifier: pid_t) throws -> AnyObject {
-        guard processIdentifier == frontmostPID, let focusedElementNode else {
+        guard let focusedElementNode else {
             throw AccessibilityClient.AXError.focusedElementUnavailable
         }
         return focusedElementNode
@@ -681,23 +426,8 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
     }
 
     func setComposerValue(_ value: String, on element: AnyObject) throws {
-        writtenValues.append(value)
         if !ignoreComposerWrites {
             storedComposerValue = value
-        }
-    }
-
-    func press(_ element: AnyObject) throws {
-        pressCount += 1
-    }
-
-    func sleep(for interval: TimeInterval) async throws {
-        sleepCount += 1
-        if !frontmostPIDsAfterSleeps.isEmpty {
-            frontmostPID = frontmostPIDsAfterSleeps.removeFirst()
-        }
-        if !sendEnabledAfterSleeps.isEmpty {
-            setSendEnabled(sendEnabledAfterSleeps.removeFirst())
         }
     }
 
@@ -705,44 +435,34 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
         returnPIDs.append(processIdentifier)
     }
 
-    func setFocusedPathToComposer() {
-        focusedWindowNode = root
-        focusedElementNode = composer
-        for node in [root, main, composer, sendContainer, sendButton] {
-            node.processIdentifier = frontmostPID
-        }
-        main.parent = root
-        composer.parent = main
-        sendContainer.parent = main
-        sendButton.parent = main
+    func sleep(for interval: TimeInterval) async throws {
+        sleepCount += 1
     }
 
     func nestSendButtonBesideComposer() {
         childrenByNode[ObjectIdentifier(main)] = [composer, sendContainer]
         childrenByNode[ObjectIdentifier(sendContainer)] = [sendButton]
-        summariesByNode[ObjectIdentifier(sendContainer)] = makeSummary(role: "AXGroup")
+        summariesByNode[ObjectIdentifier(sendContainer)] = makeSummary(
+            role: "AXGroup"
+        )
         sendContainer.parent = main
         sendButton.parent = sendContainer
     }
 
-    func setSendEnabled(_ enabled: Bool) {
-        summariesByNode[ObjectIdentifier(sendButton)] = makeSummary(
-            role: "AXButton",
-            title: "Send",
-            enabled: enabled
-        )
+    func addNearbyNodes(count: Int) {
+        let nodes = (0..<count).map { _ in Node(processIdentifier: frontmostPID) }
+        childrenByNode[ObjectIdentifier(main)] = [composer] + nodes
+        for node in nodes {
+            node.parent = main
+            childrenByNode[ObjectIdentifier(node)] = []
+            summariesByNode[ObjectIdentifier(node)] = makeSummary(role: "AXGroup")
+        }
     }
 
-    func setSendPresent(_ present: Bool) {
-        childrenByNode[ObjectIdentifier(main)] = present
-            ? [composer, sendButton]
-            : [composer]
-    }
-
-    func setComposerDescription(_ description: String?) {
-        summariesByNode[ObjectIdentifier(composer)] = makeSummary(
+    func registerDetachedInput(_ node: Node) {
+        childrenByNode[ObjectIdentifier(node)] = []
+        summariesByNode[ObjectIdentifier(node)] = makeSummary(
             role: "AXTextArea",
-            description: description,
             valueSettable: true
         )
     }

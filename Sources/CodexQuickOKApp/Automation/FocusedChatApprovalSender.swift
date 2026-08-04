@@ -1,5 +1,10 @@
 import Foundation
 
+@MainActor
+protocol CurrentApprovalSending: AnyObject {
+    func sendOK() async throws
+}
+
 enum FocusedChatSendError: Error, Equatable, LocalizedError {
     case inProgress
     case existingDraft
@@ -49,6 +54,13 @@ final class FocusedChatApprovalSender: CurrentApprovalSending {
         }
 
         try input.revalidate(target)
+        let latestRawValue = try input.composerValue(in: target)
+        let latestValue = match.normalizedComposerValue(latestRawValue)
+        guard latestValue.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty else {
+            throw FocusedChatSendError.existingDraft
+        }
         try input.setComposerValue("可", in: target)
         try await input.waitUntilComposerValue(
             "可",
