@@ -204,8 +204,29 @@ guard let qrImage = qr.outputImage else {
     fail("could not generate QR code", code: 66)
 }
 
+guard let qrForeground = CIColor(color: coal),
+      let qrBackground = CIColor(color: ivory)
+else {
+    fail("could not convert QR palette colors", code: 66)
+}
+let qrColorMap = CIFilter.colorMatrix()
+qrColorMap.inputImage = qrImage
+qrColorMap.rVector = CIVector(x: qrBackground.red - qrForeground.red, y: 0, z: 0, w: 0)
+qrColorMap.gVector = CIVector(x: qrBackground.green - qrForeground.green, y: 0, z: 0, w: 0)
+qrColorMap.bVector = CIVector(x: qrBackground.blue - qrForeground.blue, y: 0, z: 0, w: 0)
+qrColorMap.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
+qrColorMap.biasVector = CIVector(
+    x: qrForeground.red,
+    y: qrForeground.green,
+    z: qrForeground.blue,
+    w: 0
+)
+guard let coloredQRImage = qrColorMap.outputImage else {
+    fail("could not map QR code colors", code: 66)
+}
+
 let ciContext = CIContext(options: [.useSoftwareRenderer: false])
-guard let qrCGImage = ciContext.createCGImage(qrImage, from: qrImage.extent) else {
+guard let qrCGImage = ciContext.createCGImage(coloredQRImage, from: qrImage.extent) else {
     fail("could not render QR code", code: 66)
 }
 
@@ -216,7 +237,7 @@ let moduleScale = max(1, Int(qrMaximum) / (modules + quietModules * 2))
 let qrBox = CGFloat((modules + quietModules * 2) * moduleScale)
 let qrOrigin = NSPoint(x: canvas.width - safeMargin - qrBox, y: 112)
 let quietRect = NSRect(origin: qrOrigin, size: NSSize(width: qrBox, height: qrBox))
-NSColor.white.setFill()
+ivory.setFill()
 quietRect.fill()
 
 let codeOrigin = NSPoint(

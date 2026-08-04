@@ -21,4 +21,17 @@ for copy in \
   rg -F --quiet "$copy" "$ROOT/scripts/render-douyin-poster.swift"
 done
 
+for snippet in \
+  'let qrForeground = CIColor(color: coal)' \
+  'let qrBackground = CIColor(color: ivory)' \
+  'qrColorMap.inputImage = qrImage' \
+  'ivory.setFill()'; do
+  rg -F --quiet "$snippet" "$ROOT/scripts/render-douyin-poster.swift"
+done
+
+if rg -F --quiet 'NSColor.white.setFill()' "$ROOT/scripts/render-douyin-poster.swift"; then
+  print -u2 'QR quiet zone must use palette ivory, not pure white.'
+  exit 1
+fi
+
 print 'Douyin poster checks passed.'
