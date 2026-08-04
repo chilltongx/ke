@@ -45,7 +45,7 @@ final class ManualApprovalControllerTests: XCTestCase {
 
     func testFailureUsesLocalizedMessageAndDoesNotRetry() async {
         let panel = RecordingPanel()
-        let sender = StubSender(error: SendSafetyError.existingDraft)
+        let sender = StubSender(error: FocusedChatSendError.existingDraft)
         let controller = ManualApprovalController(panel: panel, sender: sender)
         controller.start()
 
@@ -55,6 +55,33 @@ final class ManualApprovalControllerTests: XCTestCase {
         XCTAssertEqual(sender.callCount, 1)
         XCTAssertEqual(panel.failures, ["检测到未发送草稿"])
         XCTAssertEqual(panel.sendingValues, [true, false])
+    }
+
+    func testUnknownFailureMentionsCurrentChatInsteadOfCodex() async {
+        struct UnknownError: Error {}
+        let panel = RecordingPanel()
+        let controller = ManualApprovalController(
+            panel: panel,
+            sender: StubSender(error: UnknownError())
+        )
+
+        controller.start()
+        panel.onActivate?()
+        await waitUntil { !panel.failures.isEmpty }
+
+        XCTAssertEqual(panel.failures, ["发送失败，请检查当前聊天框"])
+    }
+
+    func testDiagnosticCodeDoesNotContainErrorPayload() {
+        struct PayloadError: Error {
+            let message: String
+        }
+        let code = ManualApprovalController.diagnosticCode(
+            for: PayloadError(message: "private draft text")
+        )
+
+        XCTAssertTrue(code.contains("PayloadError"))
+        XCTAssertFalse(code.contains("private draft text"))
     }
 
     func testStopCancelsSendAndHidesPanel() async {

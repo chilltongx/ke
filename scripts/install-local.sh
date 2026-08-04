@@ -152,7 +152,7 @@ verify_app "$DEST_APP"
 "$LSREGISTER" -f "$DEST_APP"
 "$TOUCH" "$DEST_APP"
 "$KILLALL" Dock || true
-if ! "$OPEN" "$DEST_APP"; then
+if ! "$OPEN" -g "$DEST_APP"; then
   print -u2 -- 'Unable to open the replacement app; restoring the previous install.'
   if ! rollback_destination; then
     print -u2 -- 'Unable to restore the previous install after launch failure.'
@@ -161,7 +161,7 @@ if ! "$OPEN" "$DEST_APP"; then
   if [[ "$HAD_EXISTING" == true ]]; then
     "$LSREGISTER" -f "$DEST_APP" || true
     "$TOUCH" "$DEST_APP" || true
-    "$OPEN" "$DEST_APP" || true
+    "$OPEN" -g "$DEST_APP" || true
   fi
   exit 76
 fi

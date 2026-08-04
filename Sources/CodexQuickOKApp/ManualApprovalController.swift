@@ -1,8 +1,15 @@
+import AppKit
 import CodexQuickOKCore
 import Foundation
+import OSLog
 
 @MainActor
 final class ManualApprovalController {
+    private static let logger = Logger(
+        subsystem: "com.codexquickok.CodexQuickOK",
+        category: "send"
+    )
+
     private let panel: any CompanionPanel
     private let sender: any CurrentApprovalSending
     private var sendTask: Task<Void, Never>?
@@ -49,12 +56,30 @@ final class ManualApprovalController {
             } catch is CancellationError {
                 return
             } catch {
-                NSLog("Codex Quick OK send failed: %@", String(describing: error))
+                let diagnosticCode = Self.diagnosticCode(for: error)
+                let bundleIdentifier = NSWorkspace.shared
+                    .frontmostApplication?.bundleIdentifier ?? "none"
+                Self.logger.error(
+                    "Send failed: \(diagnosticCode, privacy: .public) frontmost=\(bundleIdentifier, privacy: .public)"
+                )
                 let message = (error as? LocalizedError)?.errorDescription
-                    ?? "发送失败，请检查 Codex"
+                    ?? "发送失败，请检查当前聊天框"
                 guard attemptID == currentAttempt else { return }
                 panel.showFailure(message)
             }
+        }
+    }
+
+    static func diagnosticCode(for error: Error) -> String {
+        switch error {
+        case let error as AccessibilityClient.AXError:
+            "accessibility.\(String(describing: error))"
+        case let error as ChatTargetClassificationError:
+            "classification.\(String(describing: error))"
+        case let error as FocusedChatSendError:
+            "send.\(String(describing: error))"
+        default:
+            String(reflecting: type(of: error))
         }
     }
 }
