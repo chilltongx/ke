@@ -24,6 +24,9 @@ protocol AccessibilitySystemProviding: AnyObject {
     ) -> [AccessibilityClient.RunningApplication]
     func activate(processIdentifier: pid_t) -> Bool
     func focusedWindow(processIdentifier: pid_t) throws -> AnyObject
+    func focusedElement(processIdentifier: pid_t) throws -> AnyObject
+    func processIdentifier(of element: AnyObject) throws -> pid_t
+    func parent(of element: AnyObject) throws -> AnyObject?
     func elementsAreEqual(_ lhs: AnyObject, _ rhs: AnyObject) -> Bool
     func children(of element: AnyObject) throws -> [AnyObject]
     func summary(
@@ -33,11 +36,12 @@ protocol AccessibilitySystemProviding: AnyObject {
     func composerValue(of element: AnyObject) throws -> String
     func setComposerValue(_ value: String, on element: AnyObject) throws
     func press(_ element: AnyObject) throws
+    func postReturn(processIdentifier: pid_t) throws
     func sleep(for interval: TimeInterval) async throws
 }
 
 @MainActor
-final class AccessibilityClient: AccessibilityControlling {
+final class AccessibilityClient: AccessibilityControlling, FocusedInputControlling {
     enum AXError: Error, Equatable, LocalizedError {
         case permissionMissing
         case codexNotRunning
@@ -53,6 +57,11 @@ final class AccessibilityClient: AccessibilityControlling {
         case sendActionTimedOut
         case invalidAccessibilityTree
         case accessibilityTreeTruncated
+        case frontmostTargetUnavailable
+        case focusedElementUnavailable
+        case targetChanged
+        case insertedValueMismatch
+        case returnDeliveryFailed
 
         var errorDescription: String? {
             switch self {
@@ -82,6 +91,16 @@ final class AccessibilityClient: AccessibilityControlling {
                 "Codex 发送按钮未能及时启用"
             case .invalidAccessibilityTree, .accessibilityTreeTruncated:
                 "无法安全读取完整的 Codex 界面"
+            case .frontmostTargetUnavailable:
+                "找不到当前前台应用"
+            case .focusedElementUnavailable:
+                "找不到当前光标输入框"
+            case .targetChanged:
+                "当前应用、窗口或光标已经变化"
+            case .insertedValueMismatch:
+                "无法确认“可”已经写入"
+            case .returnDeliveryFailed:
+                "无法发送 Enter"
             }
         }
     }
@@ -143,6 +162,10 @@ final class AccessibilityClient: AccessibilityControlling {
     }
 
     static let maximumElementCount = 5_000
+    static let maximumAncestorDepth = 12
+    static let maximumNearbyAncestorDepth = 4
+    static let maximumNearbyTraversalDepth = 3
+    static let maximumNearbyElementCount = 128
     private static let codexBundleIdentifier = "com.openai.codex"
 
     private let system: any AccessibilitySystemProviding
@@ -271,6 +294,103 @@ final class AccessibilityClient: AccessibilityControlling {
             throw AXError.sendActionMissing
         }
         try system.press(sendButton)
+    }
+
+    func captureTarget() throws -> FocusedTargetSnapshot {
+        guard system.isProcessTrusted else {
+            throw AXError.permissionMissing
+        }
+        guard let pid = system.frontmostPID,
+              pid > 0,
+              let bundleIdentifier = system.frontmostBundleIdentifier,
+              !bundleIdentifier.isEmpty
+        else {
+            throw AXError.frontmostTargetUnavailable
+        }
+
+        let window = try system.focusedWindow(processIdentifier: pid)
+        let element = try system.focusedElement(processIdentifier: pid)
+        guard try system.processIdentifier(of: window) == pid,
+              try system.processIdentifier(of: element) == pid
+        else {
+            throw AXError.focusedElementUnavailable
+        }
+        let context = try makeContext(
+            focused: element,
+            window: window,
+            expectedPID: pid
+        )
+        return FocusedTargetSnapshot(
+            processIdentifier: pid,
+            bundleIdentifier: bundleIdentifier,
+            window: window,
+            element: element,
+            context: context
+        )
+    }
+
+    func revalidate(_ target: FocusedTargetSnapshot) throws {
+        guard system.frontmostPID == target.processIdentifier,
+              system.frontmostBundleIdentifier == target.bundleIdentifier
+        else {
+            throw AXError.targetChanged
+        }
+        let window = try system.focusedWindow(
+            processIdentifier: target.processIdentifier
+        )
+        let element = try system.focusedElement(
+            processIdentifier: target.processIdentifier
+        )
+        guard try system.processIdentifier(of: window) == target.processIdentifier,
+              try system.processIdentifier(of: element) == target.processIdentifier,
+              system.elementsAreEqual(window, target.window),
+              system.elementsAreEqual(element, target.element)
+        else {
+            throw AXError.targetChanged
+        }
+    }
+
+    func composerValue(in target: FocusedTargetSnapshot) throws -> String {
+        try system.composerValue(of: target.element)
+    }
+
+    func setComposerValue(
+        _ value: String,
+        in target: FocusedTargetSnapshot
+    ) throws {
+        try revalidate(target)
+        try system.setComposerValue(value, on: target.element)
+    }
+
+    func waitUntilComposerValue(
+        _ expected: String,
+        in target: FocusedTargetSnapshot,
+        timeout: TimeInterval
+    ) async throws {
+        let maximumSleeps = max(
+            0,
+            Int(ceil(max(0, timeout) / pollInterval))
+        )
+        for attempt in 0...maximumSleeps {
+            try revalidate(target)
+            if try system.composerValue(of: target.element) == expected {
+                return
+            }
+            guard attempt < maximumSleeps else { break }
+            try await system.sleep(for: pollInterval)
+        }
+        throw AXError.insertedValueMismatch
+    }
+
+    func pressReturn(in target: FocusedTargetSnapshot) throws {
+        try revalidate(target)
+        do {
+            try system.postReturn(processIdentifier: target.processIdentifier)
+        } catch let error as AXError {
+            throw error
+        } catch {
+            throw AXError.returnDeliveryFailed
+        }
     }
 
     static func validatedChildren(_ read: AttributeRead) throws -> [AnyObject] {
@@ -463,10 +583,108 @@ final class AccessibilityClient: AccessibilityControlling {
         attributeReadSucceeded: Bool,
         value: Any?
     ) throws -> String {
-        guard attributeReadSucceeded, let value = value as? String else {
+        guard attributeReadSucceeded else {
             throw AXError.composerValueUnreadable
         }
-        return value
+        guard let value else { return "" }
+        guard let string = value as? String else {
+            throw AXError.composerValueUnreadable
+        }
+        return string
+    }
+
+    private func makeContext(
+        focused: AnyObject,
+        window: AnyObject,
+        expectedPID: pid_t
+    ) throws -> FocusedChatContext {
+        let focusedSummary = try chatSummary(
+            of: focused,
+            expectedPID: expectedPID
+        )
+        var ancestors: [ChatElementSummary] = []
+        var nearby: [ChatElementSummary] = []
+        var child = focused
+        var reachedWindow = system.elementsAreEqual(focused, window)
+
+        for ancestorDepth in 0..<Self.maximumAncestorDepth where !reachedWindow {
+            guard let parent = try system.parent(of: child) else { break }
+            ancestors.append(
+                try chatSummary(of: parent, expectedPID: expectedPID)
+            )
+            if ancestorDepth < Self.maximumNearbyAncestorDepth {
+                for sibling in try system.children(of: parent)
+                where !system.elementsAreEqual(sibling, child) {
+                    try appendNearbySummaries(
+                        startingAt: sibling,
+                        expectedPID: expectedPID,
+                        to: &nearby
+                    )
+                }
+            }
+            reachedWindow = system.elementsAreEqual(parent, window)
+            child = parent
+        }
+
+        guard reachedWindow else {
+            throw AXError.focusedElementUnavailable
+        }
+        return FocusedChatContext(
+            focused: focusedSummary,
+            ancestors: ancestors,
+            nearby: nearby
+        )
+    }
+
+    private func appendNearbySummaries(
+        startingAt root: AnyObject,
+        expectedPID: pid_t,
+        to summaries: inout [ChatElementSummary]
+    ) throws {
+        var queue: [(element: AnyObject, depth: Int)] = [(root, 0)]
+        var offset = 0
+        var visited: [AnyObject] = []
+
+        while offset < queue.count {
+            let item = queue[offset]
+            offset += 1
+            guard !visited.contains(where: {
+                system.elementsAreEqual($0, item.element)
+            }) else {
+                continue
+            }
+            visited.append(item.element)
+            guard summaries.count < Self.maximumNearbyElementCount else {
+                throw AXError.accessibilityTreeTruncated
+            }
+            summaries.append(
+                try chatSummary(of: item.element, expectedPID: expectedPID)
+            )
+            guard item.depth < Self.maximumNearbyTraversalDepth else {
+                continue
+            }
+            queue.append(contentsOf: try system.children(of: item.element).map {
+                ($0, item.depth + 1)
+            })
+        }
+    }
+
+    private func chatSummary(
+        of element: AnyObject,
+        expectedPID: pid_t
+    ) throws -> ChatElementSummary {
+        guard try system.processIdentifier(of: element) == expectedPID else {
+            throw AXError.focusedElementUnavailable
+        }
+        let summary = try system.summary(of: element, parentIndex: nil)
+        return ChatElementSummary(
+            role: summary.role,
+            subrole: summary.subrole,
+            title: summary.title,
+            description: summary.description,
+            enabled: summary.enabled,
+            valueSettable: summary.valueSettable
+        )
     }
 
     private func waitUntilFrontmost(pid: pid_t, timeout: TimeInterval) async throws {
@@ -717,6 +935,49 @@ private final class SystemAccessibilityProvider: AccessibilitySystemProviding {
         return value as AnyObject
     }
 
+    func focusedElement(processIdentifier: pid_t) throws -> AnyObject {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            application,
+            kAXFocusedUIElementAttribute as CFString,
+            &value
+        ) == .success,
+            let value,
+            CFGetTypeID(value) == AXUIElementGetTypeID()
+        else {
+            throw AccessibilityClient.AXError.focusedElementUnavailable
+        }
+        return value as AnyObject
+    }
+
+    func processIdentifier(of element: AnyObject) throws -> pid_t {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(axElement(element), &pid) == .success,
+              pid > 0
+        else {
+            throw AccessibilityClient.AXError.focusedElementUnavailable
+        }
+        return pid
+    }
+
+    func parent(of element: AnyObject) throws -> AnyObject? {
+        switch readAttribute(
+            axElement(element),
+            kAXParentAttribute as CFString
+        ) {
+        case .absent:
+            return nil
+        case .failure:
+            throw AccessibilityClient.AXError.invalidAccessibilityTree
+        case .value(let value):
+            guard CFGetTypeID(value as CFTypeRef) == AXUIElementGetTypeID() else {
+                throw AccessibilityClient.AXError.invalidAccessibilityTree
+            }
+            return value as AnyObject
+        }
+    }
+
     func elementsAreEqual(_ lhs: AnyObject, _ rhs: AnyObject) -> Bool {
         CFEqual(axElement(lhs), axElement(rhs))
     }
@@ -866,6 +1127,25 @@ private final class SystemAccessibilityProvider: AccessibilitySystemProviding {
         ) == .success else {
             throw AccessibilityClient.AXError.sendActionMissing
         }
+    }
+
+    func postReturn(processIdentifier: pid_t) throws {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: 36,
+                keyDown: true
+              ),
+              let up = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: 36,
+                keyDown: false
+              )
+        else {
+            throw AccessibilityClient.AXError.returnDeliveryFailed
+        }
+        down.postToPid(processIdentifier)
+        up.postToPid(processIdentifier)
     }
 
     func sleep(for interval: TimeInterval) async throws {

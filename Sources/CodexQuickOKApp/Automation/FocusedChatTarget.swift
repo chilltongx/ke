@@ -77,3 +77,28 @@ protocol ChatTargetAdapting {
 
     func classify(context: FocusedChatContext) throws -> ChatTargetMatch
 }
+
+struct FocusedTargetSnapshot {
+    let processIdentifier: pid_t
+    let bundleIdentifier: String
+    let window: AnyObject
+    let element: AnyObject
+    let context: FocusedChatContext
+}
+
+@MainActor
+protocol FocusedInputControlling: AnyObject {
+    func captureTarget() throws -> FocusedTargetSnapshot
+    func revalidate(_ target: FocusedTargetSnapshot) throws
+    func composerValue(in target: FocusedTargetSnapshot) throws -> String
+    func setComposerValue(
+        _ value: String,
+        in target: FocusedTargetSnapshot
+    ) throws
+    func waitUntilComposerValue(
+        _ expected: String,
+        in target: FocusedTargetSnapshot,
+        timeout: TimeInterval
+    ) async throws
+    func pressReturn(in target: FocusedTargetSnapshot) throws
+}

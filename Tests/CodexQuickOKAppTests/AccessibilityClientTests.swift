@@ -91,11 +91,21 @@ final class AccessibilityClientTests: XCTestCase {
         }
     }
 
-    func testUnreadableOrNonStringComposerValueFailsClosed() {
-        for value: Any? in [nil, NSNumber(value: 0)] {
+    func testSuccessfulNilComposerValueIsEmptyButUnreadableOrNonStringFails() throws {
+        XCTAssertEqual(
+            try AccessibilityClient.validatedComposerValue(
+                attributeReadSucceeded: true,
+                value: nil
+            ),
+            ""
+        )
+        for (readSucceeded, value): (Bool, Any?) in [
+            (false, nil),
+            (true, NSNumber(value: 0)),
+        ] {
             XCTAssertThrowsError(
                 try AccessibilityClient.validatedComposerValue(
-                    attributeReadSucceeded: value != nil,
+                    attributeReadSucceeded: readSucceeded,
                     value: value
                 )
             ) { error in
@@ -358,6 +368,135 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertEqual(system.pressCount, 0)
     }
 
+    func testCapturesFrontmostFocusedElementWithoutActivatingAnotherApp() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 81)
+        system.frontmostBundleIdentifier = "com.microsoft.VSCode"
+        system.setFocusedPathToComposer()
+        let client = AccessibilityClient(system: system, pollInterval: 0.01)
+
+        let target = try client.captureTarget()
+
+        XCTAssertEqual(target.processIdentifier, 81)
+        XCTAssertEqual(target.bundleIdentifier, "com.microsoft.VSCode")
+        XCTAssertTrue(system.elementsAreEqual(target.element, system.composer))
+        XCTAssertEqual(system.activationRequests, [])
+        XCTAssertEqual(target.context.focused.role, "AXTextArea")
+        XCTAssertEqual(
+            target.context.ancestors.map(\.role),
+            ["AXGroup", "AXWindow"]
+        )
+        XCTAssertTrue(target.context.nearby.contains { $0.title == "Send" })
+    }
+
+    func testCaptureReadsBoundedDescendantsFromAdjacentContainer() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 811)
+        system.setFocusedPathToComposer()
+        system.nestSendButtonBesideComposer()
+        let client = AccessibilityClient(system: system)
+
+        let target = try client.captureTarget()
+
+        XCTAssertTrue(target.context.nearby.contains { $0.title == "Send" })
+    }
+
+    func testCaptureRequiresAccessibilityPermission() {
+        let system = FakeAccessibilitySystem.validConversation(pid: 812)
+        system.isProcessTrusted = false
+        system.setFocusedPathToComposer()
+
+        XCTAssertThrowsError(
+            try AccessibilityClient(system: system).captureTarget()
+        ) { error in
+            XCTAssertEqual(error as? AccessibilityClient.AXError, .permissionMissing)
+        }
+    }
+
+    func testCaptureFailsWhenFocusedElementIsNotInsideFocusedWindow() {
+        let system = FakeAccessibilitySystem.validConversation(pid: 82)
+        let unrelated = FakeAccessibilitySystem.Node()
+        unrelated.processIdentifier = 82
+        system.focusedElementNode = unrelated
+        let client = AccessibilityClient(system: system)
+
+        XCTAssertThrowsError(try client.captureTarget()) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .focusedElementUnavailable
+            )
+        }
+    }
+
+    func testCaptureRejectsElementOwnedByAnotherPID() {
+        let system = FakeAccessibilitySystem.validConversation(pid: 821)
+        system.setFocusedPathToComposer()
+        system.composer.processIdentifier = 999
+        let client = AccessibilityClient(system: system)
+
+        XCTAssertThrowsError(try client.captureTarget()) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .focusedElementUnavailable
+            )
+        }
+    }
+
+    func testRevalidationRejectsPIDWindowAndElementChanges() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 83)
+        system.setFocusedPathToComposer()
+        let client = AccessibilityClient(system: system)
+        let target = try client.captureTarget()
+
+        system.frontmostPID = 84
+        XCTAssertThrowsError(try client.revalidate(target))
+
+        system.frontmostPID = 83
+        system.focusedWindowNode = system.alternateWindow
+        system.alternateWindow.processIdentifier = 83
+        XCTAssertThrowsError(try client.revalidate(target))
+
+        system.focusedWindowNode = system.root
+        system.focusedElementNode = system.sendButton
+        XCTAssertThrowsError(try client.revalidate(target))
+    }
+
+    func testWritesConfirmsAndPostsOneReturnToCapturedPID() async throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 85)
+        system.setFocusedPathToComposer()
+        let client = AccessibilityClient(system: system, pollInterval: 0.01)
+        let target = try client.captureTarget()
+
+        try client.setComposerValue("可", in: target)
+        try await client.waitUntilComposerValue("可", in: target, timeout: 0.02)
+        try client.pressReturn(in: target)
+
+        XCTAssertEqual(system.storedComposerValue, "可")
+        XCTAssertEqual(system.returnPIDs, [85])
+    }
+
+    func testValueMismatchTimesOutWithoutPostingReturn() async throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 86)
+        system.setFocusedPathToComposer()
+        system.ignoreComposerWrites = true
+        let client = AccessibilityClient(system: system, pollInterval: 0.01)
+        let target = try client.captureTarget()
+
+        try client.setComposerValue("可", in: target)
+        do {
+            try await client.waitUntilComposerValue(
+                "可",
+                in: target,
+                timeout: 0.01
+            )
+            XCTFail("Expected inserted value mismatch")
+        } catch {
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .insertedValueMismatch
+            )
+        }
+        XCTAssertEqual(system.returnPIDs, [])
+    }
+
     private func assertPrepareFails(
         _ client: AccessibilityClient,
         timeout: TimeInterval = 0.1,
@@ -397,7 +536,10 @@ final class AccessibilityClientTests: XCTestCase {
 
 @MainActor
 private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
-    final class Node: NSObject {}
+    final class Node: NSObject {
+        weak var parent: Node?
+        var processIdentifier: pid_t?
+    }
 
     var isProcessTrusted = true
     var runningPIDs: [pid_t]
@@ -412,11 +554,15 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
     private(set) var writtenValues: [String] = []
     private(set) var pressCount = 0
     var storedComposerValue = ""
+    var focusedElementNode: Node?
+    private(set) var returnPIDs: [pid_t] = []
+    var ignoreComposerWrites = false
 
     let root = Node()
     let alternateWindow = Node()
     let main = Node()
     let composer = Node()
+    let sendContainer = Node()
     let sendButton = Node()
     var focusedWindowNode: Node?
     var childrenErrorNode: Node?
@@ -477,6 +623,24 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
         return focusedWindowNode ?? root
     }
 
+    func focusedElement(processIdentifier: pid_t) throws -> AnyObject {
+        guard processIdentifier == frontmostPID, let focusedElementNode else {
+            throw AccessibilityClient.AXError.focusedElementUnavailable
+        }
+        return focusedElementNode
+    }
+
+    func processIdentifier(of element: AnyObject) throws -> pid_t {
+        guard let pid = (element as! Node).processIdentifier else {
+            throw AccessibilityClient.AXError.focusedElementUnavailable
+        }
+        return pid
+    }
+
+    func parent(of element: AnyObject) throws -> AnyObject? {
+        (element as! Node).parent
+    }
+
     func elementsAreEqual(_ lhs: AnyObject, _ rhs: AnyObject) -> Bool {
         lhs === rhs
     }
@@ -518,7 +682,9 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
 
     func setComposerValue(_ value: String, on element: AnyObject) throws {
         writtenValues.append(value)
-        storedComposerValue = value
+        if !ignoreComposerWrites {
+            storedComposerValue = value
+        }
     }
 
     func press(_ element: AnyObject) throws {
@@ -533,6 +699,30 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
         if !sendEnabledAfterSleeps.isEmpty {
             setSendEnabled(sendEnabledAfterSleeps.removeFirst())
         }
+    }
+
+    func postReturn(processIdentifier: pid_t) throws {
+        returnPIDs.append(processIdentifier)
+    }
+
+    func setFocusedPathToComposer() {
+        focusedWindowNode = root
+        focusedElementNode = composer
+        for node in [root, main, composer, sendContainer, sendButton] {
+            node.processIdentifier = frontmostPID
+        }
+        main.parent = root
+        composer.parent = main
+        sendContainer.parent = main
+        sendButton.parent = main
+    }
+
+    func nestSendButtonBesideComposer() {
+        childrenByNode[ObjectIdentifier(main)] = [composer, sendContainer]
+        childrenByNode[ObjectIdentifier(sendContainer)] = [sendButton]
+        summariesByNode[ObjectIdentifier(sendContainer)] = makeSummary(role: "AXGroup")
+        sendContainer.parent = main
+        sendButton.parent = sendContainer
     }
 
     func setSendEnabled(_ enabled: Bool) {
