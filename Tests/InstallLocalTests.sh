@@ -178,6 +178,7 @@ expect_event "$SCENARIO_LOG" "codesign:--verify --deep --strict --test-requireme
 run_install no_process
 [[ "$SCENARIO_STATUS" -eq 0 ]] || fail "no-process install exited $SCENARIO_STATUS"
 expect_no_event "$SCENARIO_LOG" 'kill:'
+expect_event "$SCENARIO_LOG" "open:-g $SCENARIO_DEST"
 [[ -f "$SCENARIO_DEST/new-marker" ]] || fail 'no-process install did not publish staged app'
 
 run_install owned_stuck
@@ -199,7 +200,7 @@ run_install open_failure
 [[ -f "$SCENARIO_DEST/old-marker" ]] || fail 'open failure did not restore working install'
 [[ ! -f "$SCENARIO_DEST/new-marker" ]] || fail 'open failure kept replacement app'
 expect_event_count "$SCENARIO_LOG" "lsregister:-f $SCENARIO_DEST" 2
-expect_event_count "$SCENARIO_LOG" "open:$SCENARIO_DEST" 2
+expect_event_count "$SCENARIO_LOG" "open:-g $SCENARIO_DEST" 2
 
 run_uninstall() {
   local scenario="$1"

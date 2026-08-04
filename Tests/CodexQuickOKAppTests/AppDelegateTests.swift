@@ -7,6 +7,64 @@ import XCTest
 
 @MainActor
 final class AppDelegateManualModeTests: XCTestCase {
+    func testLaunchFocusTargetUsesTopmostRegularWindowWhenAppIsAlreadyFrontmost() {
+        let target = AppDelegate.launchFocusTargetProcessIdentifier(
+            currentProcessIdentifier: 100,
+            frontmostProcessIdentifier: 100,
+            windowCandidates: [
+                .init(processIdentifier: 200, layer: 25, isRegularApplication: false),
+                .init(processIdentifier: 300, layer: 0, isRegularApplication: false),
+                .init(processIdentifier: 400, layer: 0, isRegularApplication: true),
+                .init(processIdentifier: 500, layer: 0, isRegularApplication: true),
+            ]
+        )
+
+        XCTAssertEqual(target, 400)
+    }
+
+    func testRestoresPreviouslyFrontmostApplicationAfterBecomingActive() {
+        var restoredProcessIdentifiers: [pid_t] = []
+        var pendingRestorations: [@MainActor () -> Void] = []
+        let delegate = makeDelegate(
+            scheduleActivationRestoration: { operation in
+                pendingRestorations.append(operation)
+            },
+            initialActivationRestoreTargetProcessIdentifier: 4_242,
+            restoreApplicationActivation: {
+                restoredProcessIdentifiers.append($0)
+            }
+        )
+
+        delegate.applicationDidBecomeActive(
+            Notification(name: NSApplication.didBecomeActiveNotification)
+        )
+
+        XCTAssertTrue(restoredProcessIdentifiers.isEmpty)
+        XCTAssertEqual(pendingRestorations.count, 1)
+        pendingRestorations.removeFirst()()
+        XCTAssertEqual(restoredProcessIdentifiers, [4_242])
+    }
+
+    func testWillBecomeActiveRefreshesStaleLaunchTarget() {
+        var restoredProcessIdentifiers: [pid_t] = []
+        let delegate = makeDelegate(
+            initialActivationRestoreTargetProcessIdentifier: 4_242,
+            focusRestoreTargetProvider: { 5_252 },
+            restoreApplicationActivation: {
+                restoredProcessIdentifiers.append($0)
+            }
+        )
+
+        delegate.applicationWillBecomeActive(
+            Notification(name: NSApplication.willBecomeActiveNotification)
+        )
+        delegate.applicationDidBecomeActive(
+            Notification(name: NSApplication.didBecomeActiveNotification)
+        )
+
+        XCTAssertEqual(restoredProcessIdentifiers, [5_252])
+    }
+
     func testManualRuntimeShowsImmediatelyAndReopenRestoresIt() {
         let panel = RecordingPanel()
         let delegate = makeDelegate()
@@ -142,14 +200,25 @@ final class AppDelegateManualModeTests: XCTestCase {
         loginItemManager: any LegacyLoginItemManaging =
             FakeLoginItemManager(status: .notRegistered),
         loginMigrationState: any LegacyLoginItemMigrationStateStoring =
-            FakeLoginItemMigrationState()
+            FakeLoginItemMigrationState(),
+        scheduleActivationRestoration: @escaping (
+            @escaping @MainActor () -> Void
+        ) -> Void = { $0() },
+        initialActivationRestoreTargetProcessIdentifier: pid_t? = nil,
+        focusRestoreTargetProvider: @escaping () -> pid_t? = { nil },
+        restoreApplicationActivation: @escaping @MainActor (pid_t) -> Void = { _ in }
     ) -> AppDelegate {
         AppDelegate(
             appServer: ControlledAppServer(),
             codexBinaryProvider: { URL(fileURLWithPath: "/tmp/codex") },
             terminationReply: { _ in },
             loginItemManager: loginItemManager,
-            loginMigrationState: loginMigrationState
+            loginMigrationState: loginMigrationState,
+            scheduleActivationRestoration: scheduleActivationRestoration,
+            initialActivationRestoreTargetProcessIdentifier:
+                initialActivationRestoreTargetProcessIdentifier,
+            focusRestoreTargetProvider: focusRestoreTargetProvider,
+            restoreApplicationActivation: restoreApplicationActivation
         )
     }
 }

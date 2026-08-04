@@ -1,8 +1,15 @@
+import AppKit
 import CodexQuickOKCore
 import Foundation
+import OSLog
 
 @MainActor
 final class ManualApprovalController {
+    private static let logger = Logger(
+        subsystem: "com.codexquickok.CodexQuickOK",
+        category: "send"
+    )
+
     private let panel: any CompanionPanel
     private let sender: any CurrentApprovalSending
     private var sendTask: Task<Void, Never>?
@@ -49,7 +56,12 @@ final class ManualApprovalController {
             } catch is CancellationError {
                 return
             } catch {
-                NSLog("可 send failed: %@", Self.diagnosticCode(for: error))
+                let diagnosticCode = Self.diagnosticCode(for: error)
+                let bundleIdentifier = NSWorkspace.shared
+                    .frontmostApplication?.bundleIdentifier ?? "none"
+                Self.logger.error(
+                    "Send failed: \(diagnosticCode, privacy: .public) frontmost=\(bundleIdentifier, privacy: .public)"
+                )
                 let message = (error as? LocalizedError)?.errorDescription
                     ?? "发送失败，请检查当前聊天框"
                 guard attemptID == currentAttempt else { return }
