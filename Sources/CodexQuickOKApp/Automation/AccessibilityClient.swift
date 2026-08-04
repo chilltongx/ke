@@ -13,6 +13,7 @@ protocol AccessibilitySystemProviding: AnyObject {
     func processIdentifier(of element: AnyObject) throws -> pid_t
     func parent(of element: AnyObject) throws -> AnyObject?
     func elementsAreEqual(_ lhs: AnyObject, _ rhs: AnyObject) -> Bool
+    func isFocused(_ element: AnyObject) throws -> Bool
     func children(of element: AnyObject) throws -> [AnyObject]
     func summary(
         of element: AnyObject,
@@ -99,7 +100,8 @@ final class AccessibilityClient: FocusedInputControlling {
         }
     }
 
-    static let maximumAncestorDepth = 12
+    static let maximumAncestorDepth = 64
+    static let maximumFocusedElementScanCount = 2_048
     static let maximumNearbyAncestorDepth = 4
     static let maximumNearbyTraversalDepth = 3
     static let maximumNearbyElementCount = 128
@@ -132,7 +134,10 @@ final class AccessibilityClient: FocusedInputControlling {
         }
 
         let window = try system.focusedWindow(processIdentifier: pid)
-        let element = try system.focusedElement(processIdentifier: pid)
+        let element = try resolveFocusedElement(
+            processIdentifier: pid,
+            window: window
+        )
         guard try system.processIdentifier(of: window) == pid,
               try system.processIdentifier(of: element) == pid
         else {
@@ -161,8 +166,9 @@ final class AccessibilityClient: FocusedInputControlling {
         let window = try system.focusedWindow(
             processIdentifier: target.processIdentifier
         )
-        let element = try system.focusedElement(
-            processIdentifier: target.processIdentifier
+        let element = try resolveFocusedElement(
+            processIdentifier: target.processIdentifier,
+            window: window
         )
         guard try system.processIdentifier(of: window) == target.processIdentifier,
               try system.processIdentifier(of: element) == target.processIdentifier,
@@ -340,6 +346,30 @@ final class AccessibilityClient: FocusedInputControlling {
         )
     }
 
+    private func resolveFocusedElement(
+        processIdentifier: pid_t,
+        window: AnyObject
+    ) throws -> AnyObject {
+        do {
+            return try system.focusedElement(processIdentifier: processIdentifier)
+        } catch AXError.focusedElementUnavailable {
+            var queue = try system.children(of: window)
+            var offset = 0
+            while offset < queue.count {
+                guard offset < Self.maximumFocusedElementScanCount else {
+                    throw AXError.accessibilityTreeTruncated
+                }
+                let candidate = queue[offset]
+                offset += 1
+                if try system.isFocused(candidate) {
+                    return candidate
+                }
+                queue.append(contentsOf: try system.children(of: candidate))
+            }
+            throw AXError.focusedElementUnavailable
+        }
+    }
+
     private func appendNearbySummaries(
         startingAt root: AnyObject,
         expectedPID: pid_t,
@@ -502,6 +532,23 @@ private final class SystemAccessibilityProvider: AccessibilitySystemProviding {
 
     func elementsAreEqual(_ lhs: AnyObject, _ rhs: AnyObject) -> Bool {
         CFEqual(axElement(lhs), axElement(rhs))
+    }
+
+    func isFocused(_ element: AnyObject) throws -> Bool {
+        switch readAttribute(
+            axElement(element),
+            kAXFocusedAttribute as CFString
+        ) {
+        case .absent:
+            return false
+        case .failure:
+            throw AccessibilityClient.AXError.invalidAccessibilityTree
+        case .value(let value):
+            guard let focused = value as? Bool else {
+                throw AccessibilityClient.AXError.invalidAccessibilityTree
+            }
+            return focused
+        }
     }
 
     func children(of element: AnyObject) throws -> [AnyObject] {

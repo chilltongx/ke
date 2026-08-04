@@ -124,6 +124,38 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertTrue(target.context.nearby.contains { $0.title == "Send" })
     }
 
+    func testCaptureFallsBackToFocusedDescendantWhenAppOmitsFocusedElement() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 810)
+        system.focusedElementNode = nil
+        system.composer.isFocused = true
+        let client = AccessibilityClient(system: system)
+
+        let target = try client.captureTarget()
+
+        XCTAssertTrue(system.elementsAreEqual(target.element, system.composer))
+    }
+
+    func testRevalidateUsesFocusedDescendantFallback() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 8101)
+        system.focusedElementNode = nil
+        system.composer.isFocused = true
+        let client = AccessibilityClient(system: system)
+        let target = try client.captureTarget()
+
+        XCTAssertNoThrow(try client.revalidate(target))
+    }
+
+    func testCaptureAcceptsComposerThirtyAncestorsBelowWindow() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 8102)
+        system.nestComposer(parentDepth: 30)
+        let client = AccessibilityClient(system: system)
+
+        let target = try client.captureTarget()
+
+        XCTAssertTrue(system.elementsAreEqual(target.element, system.composer))
+        XCTAssertEqual(target.context.ancestors.count, 30)
+    }
+
     func testCaptureReadsBoundedDescendantsFromAdjacentContainer() throws {
         let system = FakeAccessibilitySystem.validConversation(pid: 811)
         system.nestSendButtonBesideComposer()
@@ -288,6 +320,7 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
     final class Node: NSObject {
         weak var parent: Node?
         var processIdentifier: pid_t?
+        var isFocused = false
 
         init(processIdentifier: pid_t? = nil) {
             self.processIdentifier = processIdentifier
@@ -390,6 +423,10 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
         lhs === rhs
     }
 
+    func isFocused(_ element: AnyObject) throws -> Bool {
+        (element as! Node).isFocused
+    }
+
     func children(of element: AnyObject) throws -> [AnyObject] {
         let node = element as! Node
         if node === childrenErrorNode {
@@ -447,6 +484,31 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
         )
         sendContainer.parent = main
         sendButton.parent = sendContainer
+    }
+
+    func nestComposer(parentDepth: Int) {
+        precondition(parentDepth >= 2)
+        let groups = (0..<(parentDepth - 1)).map { _ in
+            Node(processIdentifier: frontmostPID)
+        }
+        childrenByNode[ObjectIdentifier(root)] = [groups[0]]
+        groups[0].parent = root
+        for index in groups.indices {
+            summariesByNode[ObjectIdentifier(groups[index])] = makeSummary(
+                role: "AXGroup"
+            )
+            if index + 1 < groups.count {
+                childrenByNode[ObjectIdentifier(groups[index])] = [groups[index + 1]]
+                groups[index + 1].parent = groups[index]
+            } else {
+                childrenByNode[ObjectIdentifier(groups[index])] = [
+                    composer,
+                    sendButton,
+                ]
+                composer.parent = groups[index]
+                sendButton.parent = groups[index]
+            }
+        }
     }
 
     func addNearbyNodes(count: Int) {
