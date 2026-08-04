@@ -6,6 +6,7 @@ import Vision
 let expectedWidth = 1_080
 let expectedHeight = 1_920
 let expectedPayload = "https://github.com/chilltongx/ke"
+let pngSignature = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("poster validation failed: \(message)\n".utf8))
@@ -17,8 +18,15 @@ guard CommandLine.arguments.count == 2 else {
 }
 
 let posterURL = URL(fileURLWithPath: CommandLine.arguments[1])
-guard let data = try? Data(contentsOf: posterURL),
-      let bitmap = NSBitmapImageRep(data: data),
+guard let data = try? Data(contentsOf: posterURL) else {
+    fail("could not load PNG")
+}
+
+guard data.starts(with: pngSignature) else {
+    fail("expected PNG signature")
+}
+
+guard let bitmap = NSBitmapImageRep(data: data),
       let cgImage = bitmap.cgImage
 else {
     fail("could not load PNG")

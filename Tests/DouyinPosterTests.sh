@@ -5,11 +5,35 @@ ROOT="${0:A:h:h}"
 OUTPUT_DIR="$(mktemp -d)"
 trap 'rm -rf "$OUTPUT_DIR"' EXIT
 POSTER="$OUTPUT_DIR/ke-douyin-poster.png"
+NON_PNG="$OUTPUT_DIR/ke-douyin-poster.tiff"
+NON_PNG_STDERR="$OUTPUT_DIR/non-png.stderr"
+DELIVERED_POSTER="${DELIVERED_POSTER:-$ROOT/marketing/ke-douyin-poster.png}"
 
 swift "$ROOT/scripts/render-douyin-poster.swift" \
   "$ROOT/marketing/assets/ke-poster-background.png" \
   "$POSTER"
 swift "$ROOT/scripts/validate-douyin-poster.swift" "$POSTER"
+
+sips -s format tiff "$POSTER" --out "$NON_PNG" >/dev/null
+if swift "$ROOT/scripts/validate-douyin-poster.swift" "$NON_PNG" \
+  > /dev/null 2> "$NON_PNG_STDERR"; then
+  print -u2 'Poster validator accepted a TIFF file.'
+  exit 1
+fi
+rg -F --quiet 'poster validation failed: expected PNG signature' "$NON_PNG_STDERR"
+
+if [[ "${INJECT_POSTER_DRIFT:-0}" == "1" ]]; then
+  DELIVERED_POSTER="$OUTPUT_DIR/drifted-poster.png"
+  swift "$ROOT/scripts/render-douyin-poster.swift" \
+    "$ROOT/marketing/ke-douyin-poster.png" \
+    "$DELIVERED_POSTER"
+fi
+
+swift "$ROOT/scripts/validate-douyin-poster.swift" "$DELIVERED_POSTER"
+if ! cmp -s "$POSTER" "$DELIVERED_POSTER"; then
+  print -u2 "Delivered poster differs from renderer output: $DELIVERED_POSTER"
+  exit 1
+fi
 
 for copy in \
   'MACOS · OPEN SOURCE' \
