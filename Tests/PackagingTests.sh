@@ -152,7 +152,7 @@ zsh "$ROOT/Tests/InstallLocalTests.sh" || fail 'install-local behavioral checks 
 zsh "$ROOT/Tests/BuildReleaseTests.sh" || fail 'build-release behavioral checks failed'
 
 if [[ -f "$ROOT/README.md" ]]; then
-  expected_headings=('# Codex 可' '## 安装' '## 使用' '## 安全边界' '## 卸载')
+  expected_headings=('# 可' '## 安装' '## 使用' '## 安全边界' '## 卸载')
   previous=0
   for heading in "${expected_headings[@]}"; do
     line="$(grep -nFx -- "$heading" "$ROOT/README.md" | head -n 1 | cut -d: -f1 || true)"

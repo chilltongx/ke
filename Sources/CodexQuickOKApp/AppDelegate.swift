@@ -128,8 +128,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         removeLegacyLoginItemIfNeeded()
 
         let panel = FloatingPanelController()
-        let automation = CurrentCodexAutomation(accessibility: AccessibilityClient())
-        let sender = CurrentWindowApprovalSender(automation: automation)
+        let accessibility = AccessibilityClient()
+        let sender = FocusedChatApprovalSender(
+            input: accessibility,
+            classifier: ChatTargetClassifier()
+        )
         configureManualRuntime(panel: panel, sender: sender)
 
         quotaTimer = Timer.scheduledTimer(
