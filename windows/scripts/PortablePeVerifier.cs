@@ -12,6 +12,9 @@ public static class PortablePeVerifier
     private const ushort WindowsGuiSubsystem = 2;
     private const int IconResourceType = 3;
     private const int GroupIconResourceType = 14;
+    private const int MaximumIconDimension = 256;
+    private const int MaximumDecodedRgbaBytes = 256 * ((256 * 4) + 1);
+    private const int MaximumCompressedRgbaBytes = MaximumDecodedRgbaBytes + 65536;
     private static readonly byte[] PngSignature =
         { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
     private static readonly byte[] IhdrChunkType = Encoding.ASCII.GetBytes("IHDR");
@@ -52,8 +55,26 @@ public static class PortablePeVerifier
         ExpectRejected("RT_ICON PNG IHDR dimensions disagree with group icon", valid.Mutate(bytes =>
             WriteBigEndianUInt32(bytes, valid.FirstPngFileOffset + 16, 17)));
 
+        ExpectRejected("RT_ICON PNG IHDR bit depth is not 8", valid.Mutate(bytes =>
+        {
+            bytes[valid.FirstPngFileOffset + 24] = 0;
+            RewritePngChunkCrc(bytes, valid.FirstPngFileOffset + 12, 13);
+        }));
+
         ExpectRejected("RT_ICON PNG has a bad IHDR CRC", valid.Mutate(bytes =>
             bytes[valid.FirstPngFileOffset + 29] ^= 0x01));
+
+        ExpectRejected("RT_ICON PNG IDAT zlib stream is invalid", valid.Mutate(bytes =>
+        {
+            Array.Clear(
+                bytes,
+                valid.FirstPngIdatDataFileOffset,
+                valid.FirstPngIdatDataLength);
+            RewritePngChunkCrc(
+                bytes,
+                valid.FirstPngIdatDataFileOffset - 4,
+                valid.FirstPngIdatDataLength);
+        }));
 
         ExpectRejected("RT_ICON PNG is missing IEND", valid.Mutate(bytes =>
         {
@@ -284,6 +305,7 @@ public static class PortablePeVerifier
         var sawIdat = false;
         var idatSequenceEnded = false;
         var sawIend = false;
+        using var idatPayload = new MemoryStream();
         while (offset < data.Length)
         {
             if (data.Length - offset < 12)
@@ -338,11 +360,14 @@ public static class PortablePeVerifier
                     throw new InvalidDataException("RT_ICON PNG IHDR dimensions are incorrect");
                 }
 
-                if (data[chunkDataOffset + 10] != 0 ||
+                if (data[chunkDataOffset + 8] != 8 ||
+                    data[chunkDataOffset + 9] != 6 ||
+                    data[chunkDataOffset + 10] != 0 ||
                     data[chunkDataOffset + 11] != 0 ||
-                    data[chunkDataOffset + 12] > 1)
+                    data[chunkDataOffset + 12] != 0)
                 {
-                    throw new InvalidDataException("RT_ICON PNG IHDR methods are invalid");
+                    throw new InvalidDataException(
+                        "RT_ICON PNG must be 8-bit RGBA with standard methods and no interlace");
                 }
 
                 sawIhdr = true;
@@ -358,6 +383,13 @@ public static class PortablePeVerifier
                 {
                     throw new InvalidDataException("RT_ICON PNG IDAT chunks must be consecutive");
                 }
+
+                if (idatPayload.Length + chunkDataLength > MaximumCompressedRgbaBytes)
+                {
+                    throw new InvalidDataException("RT_ICON PNG compressed IDAT data is too large");
+                }
+
+                idatPayload.Write(data, chunkDataOffset, chunkDataLength);
 
                 sawIdat = true;
             }
@@ -389,6 +421,63 @@ public static class PortablePeVerifier
         {
             throw new InvalidDataException("RT_ICON PNG chunk stream is incomplete");
         }
+
+        VerifyDecodedRgba(idatPayload.ToArray(), expectedWidth, expectedHeight);
+    }
+
+    private static void VerifyDecodedRgba(byte[] compressed, int width, int height)
+    {
+        if (width <= 0 || height <= 0 ||
+            width > MaximumIconDimension || height > MaximumIconDimension)
+        {
+            throw new InvalidDataException("RT_ICON PNG dimensions exceed the icon contract");
+        }
+
+        if (compressed.Length == 0 || compressed.Length > MaximumCompressedRgbaBytes)
+        {
+            throw new InvalidDataException("RT_ICON PNG compressed IDAT data is invalid");
+        }
+
+        var scanlineLength = checked(1 + (width * 4));
+        var expectedLength = checked(height * scanlineLength);
+        if (expectedLength > MaximumDecodedRgbaBytes)
+        {
+            throw new InvalidDataException("RT_ICON PNG decoded RGBA data is too large");
+        }
+
+        var decoded = new byte[checked(expectedLength + 1)];
+        var decodedLength = 0;
+        using var input = new MemoryStream(compressed, writable: false);
+        using (var zlib = new System.IO.Compression.ZLibStream(
+                   input,
+                   System.IO.Compression.CompressionMode.Decompress,
+                   leaveOpen: true))
+        {
+            while (decodedLength < decoded.Length)
+            {
+                var read = zlib.Read(decoded, decodedLength, decoded.Length - decodedLength);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                decodedLength += read;
+            }
+        }
+
+        if (decodedLength != expectedLength)
+        {
+            throw new InvalidDataException(
+                "RT_ICON PNG decoded RGBA length does not match its dimensions");
+        }
+
+        for (var row = 0; row < height; row++)
+        {
+            if (decoded[row * scanlineLength] > 4)
+            {
+                throw new InvalidDataException("RT_ICON PNG scanline filter is invalid");
+            }
+        }
     }
 
     private static uint ComputePngCrc(ReadOnlySpan<byte> bytes)
@@ -404,6 +493,12 @@ public static class PortablePeVerifier
         }
 
         return ~crc;
+    }
+
+    private static void RewritePngChunkCrc(byte[] bytes, int typeOffset, int dataLength)
+    {
+        var crc = ComputePngCrc(bytes.AsSpan(typeOffset, checked(4 + dataLength)));
+        WriteBigEndianUInt32(bytes, checked(typeOffset + 4 + dataLength), crc);
     }
 
     private static int GetOptionalFieldOffset(
@@ -702,6 +797,8 @@ public static class PortablePeVerifier
             int firstPngFileOffset,
             int firstPngIendFileOffset,
             int firstPngLength,
+            int firstPngIdatDataFileOffset,
+            int firstPngIdatDataLength,
             int firstIconDataEntryFileOffset)
         {
             Bytes = bytes;
@@ -709,6 +806,8 @@ public static class PortablePeVerifier
             FirstPngFileOffset = firstPngFileOffset;
             FirstPngIendFileOffset = firstPngIendFileOffset;
             FirstPngLength = firstPngLength;
+            FirstPngIdatDataFileOffset = firstPngIdatDataFileOffset;
+            FirstPngIdatDataLength = firstPngIdatDataLength;
             FirstIconDataEntryFileOffset = firstIconDataEntryFileOffset;
         }
 
@@ -720,6 +819,8 @@ public static class PortablePeVerifier
         public int FirstPngFileOffset { get; }
         public int FirstPngIendFileOffset { get; }
         public int FirstPngLength { get; }
+        public int FirstPngIdatDataFileOffset { get; }
+        public int FirstPngIdatDataLength { get; }
         public int FirstIconDataEntryFileOffset { get; }
 
         public byte[] Mutate(Action<byte[]> mutation)
@@ -766,6 +867,8 @@ public static class PortablePeVerifier
                 ResourceRawOffset + fixture.FirstPngOffset,
                 ResourceRawOffset + fixture.FirstPngIendOffset,
                 fixture.FirstPngLength,
+                ResourceRawOffset + fixture.FirstPngIdatDataOffset,
+                fixture.FirstPngIdatDataLength,
                 ResourceRawOffset + fixture.FirstIconDataEntryOffset);
         }
 
@@ -822,6 +925,8 @@ public static class PortablePeVerifier
                 pngOffsets[0],
                 pngOffsets[0] + pngs[0].IendOffset,
                 pngs[0].Bytes.Length,
+                pngOffsets[0] + pngs[0].IdatDataOffset,
+                pngs[0].IdatDataLength,
                 iconDataEntries[0]);
         }
 
@@ -886,10 +991,15 @@ public static class PortablePeVerifier
             using var png = new MemoryStream();
             png.Write(PngSignature);
             WritePngChunk(png, IhdrChunkType, ihdr);
+            var idatChunkOffset = checked((int)png.Position);
             WritePngChunk(png, IdatChunkType, compressed.ToArray());
             var iendOffset = checked((int)png.Position);
             WritePngChunk(png, IendChunkType, Array.Empty<byte>());
-            return new PngFixture(png.ToArray(), iendOffset);
+            return new PngFixture(
+                png.ToArray(),
+                iendOffset,
+                idatChunkOffset + 8,
+                checked((int)compressed.Length));
         }
 
         private static void WritePngChunk(MemoryStream stream, byte[] type, byte[] data)
@@ -963,7 +1073,13 @@ public static class PortablePeVerifier
         int FirstPngOffset,
         int FirstPngIendOffset,
         int FirstPngLength,
+        int FirstPngIdatDataOffset,
+        int FirstPngIdatDataLength,
         int FirstIconDataEntryOffset);
 
-    private sealed record PngFixture(byte[] Bytes, int IendOffset);
+    private sealed record PngFixture(
+        byte[] Bytes,
+        int IendOffset,
+        int IdatDataOffset,
+        int IdatDataLength);
 }
