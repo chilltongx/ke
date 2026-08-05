@@ -36,6 +36,7 @@ public static class PortablePeVerifier
     {
         var valid = TestPeImage.Create();
         VerifyImage(valid.Bytes);
+        VerifyImage(TestPeImage.Create(splitIdat: true).Bytes);
 
         ExpectRejected("declared optional-header boundary", valid.Mutate(bytes =>
             WriteUInt16(bytes, valid.CoffHeaderOffset + 16, 70)));
@@ -70,6 +71,54 @@ public static class PortablePeVerifier
                 bytes,
                 valid.FirstPngIdatDataFileOffset,
                 valid.FirstPngIdatDataLength);
+            RewritePngChunkCrc(
+                bytes,
+                valid.FirstPngIdatDataFileOffset - 4,
+                valid.FirstPngIdatDataLength);
+        }));
+
+        ExpectRejected("RT_ICON PNG zlib footer is truncated", valid.Mutate(bytes =>
+        {
+            var shortenedIdatLength = valid.FirstPngIdatDataLength - 1;
+            var removedByteOffset = valid.FirstPngIdatDataFileOffset + shortenedIdatLength;
+            var pngEnd = valid.FirstPngFileOffset + valid.FirstPngLength;
+            Buffer.BlockCopy(
+                bytes,
+                removedByteOffset + 1,
+                bytes,
+                removedByteOffset,
+                pngEnd - removedByteOffset - 1);
+            WriteBigEndianUInt32(
+                bytes,
+                valid.FirstPngIdatDataFileOffset - 8,
+                checked((uint)shortenedIdatLength));
+            RewritePngChunkCrc(
+                bytes,
+                valid.FirstPngIdatDataFileOffset - 4,
+                shortenedIdatLength);
+            var shortenedPngLength = checked((uint)(valid.FirstPngLength - 1));
+            WriteUInt32(bytes, valid.GroupDataFileOffset + 6 + 8, shortenedPngLength);
+            WriteUInt32(
+                bytes,
+                valid.FirstIconDataEntryFileOffset + 4,
+                shortenedPngLength);
+        }));
+
+        ExpectRejected("RT_ICON PNG zlib header is invalid", valid.Mutate(bytes =>
+        {
+            bytes[valid.FirstPngIdatDataFileOffset] = 0;
+            RewritePngChunkCrc(
+                bytes,
+                valid.FirstPngIdatDataFileOffset - 4,
+                valid.FirstPngIdatDataLength);
+        }));
+
+        ExpectRejected("RT_ICON PNG zlib Adler-32 is invalid", valid.Mutate(bytes =>
+        {
+            bytes[
+                valid.FirstPngIdatDataFileOffset +
+                valid.FirstPngIdatDataLength -
+                1] ^= 0x01;
             RewritePngChunkCrc(
                 bytes,
                 valid.FirstPngIdatDataFileOffset - 4,
@@ -433,10 +482,25 @@ public static class PortablePeVerifier
             throw new InvalidDataException("RT_ICON PNG dimensions exceed the icon contract");
         }
 
-        if (compressed.Length == 0 || compressed.Length > MaximumCompressedRgbaBytes)
+        if (compressed.Length < 8 || compressed.Length > MaximumCompressedRgbaBytes)
         {
             throw new InvalidDataException("RT_ICON PNG compressed IDAT data is invalid");
         }
+
+        var cmf = compressed[0];
+        var flg = compressed[1];
+        var compressionMethod = cmf & 0x0F;
+        var compressionInfo = cmf >> 4;
+        var header = (cmf << 8) | flg;
+        if (compressionMethod != 8 ||
+            compressionInfo > 7 ||
+            header % 31 != 0 ||
+            (flg & 0x20) != 0)
+        {
+            throw new InvalidDataException("RT_ICON PNG zlib header is invalid");
+        }
+
+        var expectedAdler = ReadBigEndianUInt32(compressed, compressed.Length - 4);
 
         var scanlineLength = checked(1 + (width * 4));
         var expectedLength = checked(height * scanlineLength);
@@ -465,10 +529,21 @@ public static class PortablePeVerifier
             }
         }
 
+        if (input.Position != input.Length)
+        {
+            throw new InvalidDataException("RT_ICON PNG zlib stream has trailing compressed data");
+        }
+
         if (decodedLength != expectedLength)
         {
             throw new InvalidDataException(
                 "RT_ICON PNG decoded RGBA length does not match its dimensions");
+        }
+
+        var actualAdler = ComputeAdler32(decoded.AsSpan(0, decodedLength));
+        if (actualAdler != expectedAdler)
+        {
+            throw new InvalidDataException("RT_ICON PNG zlib Adler-32 is incorrect");
         }
 
         for (var row = 0; row < height; row++)
@@ -478,6 +553,20 @@ public static class PortablePeVerifier
                 throw new InvalidDataException("RT_ICON PNG scanline filter is invalid");
             }
         }
+    }
+
+    private static uint ComputeAdler32(ReadOnlySpan<byte> bytes)
+    {
+        const uint modulus = 65521;
+        uint first = 1;
+        uint second = 0;
+        foreach (var value in bytes)
+        {
+            first = (first + value) % modulus;
+            second = (second + first) % modulus;
+        }
+
+        return (second << 16) | first;
     }
 
     private static uint ComputePngCrc(ReadOnlySpan<byte> bytes)
@@ -830,9 +919,9 @@ public static class PortablePeVerifier
             return copy;
         }
 
-        public static TestPeImage Create()
+        public static TestPeImage Create(bool splitIdat = false)
         {
-            var resource = new ResourceFixtureBuilder(ResourceRva);
+            var resource = new ResourceFixtureBuilder(ResourceRva, splitIdat);
             var fixture = resource.Build();
             var rawSize = Align(fixture.Bytes.Length, 0x200);
             var bytes = new byte[checked(ResourceRawOffset + rawSize)];
@@ -879,9 +968,14 @@ public static class PortablePeVerifier
     private sealed class ResourceFixtureBuilder
     {
         private readonly uint _resourceRva;
+        private readonly bool _splitIdat;
         private readonly List<byte> _bytes = new();
 
-        public ResourceFixtureBuilder(uint resourceRva) => _resourceRva = resourceRva;
+        public ResourceFixtureBuilder(uint resourceRva, bool splitIdat)
+        {
+            _resourceRva = resourceRva;
+            _splitIdat = splitIdat;
+        }
 
         public ResourceFixture Build()
         {
@@ -970,7 +1064,7 @@ public static class PortablePeVerifier
             WriteUInt32(_bytes, offset + 4, checked((uint)size));
         }
 
-        private static PngFixture CreatePng(int size)
+        private PngFixture CreatePng(int size)
         {
             var ihdr = new byte[13];
             WriteBigEndianUInt32(ihdr, 0, checked((uint)size));
@@ -992,14 +1086,26 @@ public static class PortablePeVerifier
             png.Write(PngSignature);
             WritePngChunk(png, IhdrChunkType, ihdr);
             var idatChunkOffset = checked((int)png.Position);
-            WritePngChunk(png, IdatChunkType, compressed.ToArray());
+            var compressedBytes = compressed.ToArray();
+            var firstIdatLength = compressedBytes.Length;
+            if (_splitIdat)
+            {
+                firstIdatLength = compressedBytes.Length / 2;
+                WritePngChunk(png, IdatChunkType, compressedBytes[..firstIdatLength]);
+                WritePngChunk(png, IdatChunkType, compressedBytes[firstIdatLength..]);
+            }
+            else
+            {
+                WritePngChunk(png, IdatChunkType, compressedBytes);
+            }
+
             var iendOffset = checked((int)png.Position);
             WritePngChunk(png, IendChunkType, Array.Empty<byte>());
             return new PngFixture(
                 png.ToArray(),
                 iendOffset,
                 idatChunkOffset + 8,
-                checked((int)compressed.Length));
+                firstIdatLength);
         }
 
         private static void WritePngChunk(MemoryStream stream, byte[] type, byte[] data)
