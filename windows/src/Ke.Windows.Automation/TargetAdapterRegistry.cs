@@ -6,7 +6,7 @@ public sealed class TargetAdapterRegistry
 {
     private readonly IReadOnlyDictionary<string, ITargetAdapter> _adapters;
 
-    private TargetAdapterRegistry(IEnumerable<ITargetAdapter> adapters)
+    internal TargetAdapterRegistry(IEnumerable<ITargetAdapter> adapters)
     {
         _adapters = adapters.ToDictionary(
             adapter => adapter.ProcessImageName,
