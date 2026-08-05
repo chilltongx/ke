@@ -47,13 +47,15 @@ public sealed class ButtonFeedbackControllerTests
             new[] { TimeSpan.FromMilliseconds(650), TimeSpan.FromMilliseconds(2500) },
             delay.Requested.Order());
 
-        var visualChanged = delay.Changed;
+        var visualChanged = view.WaitForVisual(ButtonFeedbackVisual.Idle);
         delay.Complete(TimeSpan.FromMilliseconds(650));
         await visualChanged;
         Assert.Equal(ButtonFeedbackVisual.Idle, view.Visual);
         Assert.Equal("已发送可", view.ToolTip);
 
+        var tooltipCleared = view.WaitForToolTip(message: null);
         delay.Complete(TimeSpan.FromMilliseconds(2500));
+        await tooltipCleared;
         await sequence;
         Assert.Null(view.ToolTip);
     }
@@ -70,12 +72,14 @@ public sealed class ButtonFeedbackControllerTests
 
         Assert.Equal(ButtonFeedbackVisual.Failure, view.Visual);
         Assert.Equal("输入框已有内容，未发送", view.ToolTip);
-        var visualChanged = delay.Changed;
+        var visualChanged = view.WaitForVisual(ButtonFeedbackVisual.Idle);
         delay.Complete(TimeSpan.FromMilliseconds(900));
         await visualChanged;
         Assert.Equal(ButtonFeedbackVisual.Idle, view.Visual);
 
+        var tooltipCleared = view.WaitForToolTip(message: null);
         delay.Complete(TimeSpan.FromMilliseconds(2500));
+        await tooltipCleared;
         await sequence;
     }
 
@@ -123,18 +127,46 @@ public sealed class ButtonFeedbackControllerTests
         var second = controller.ShowResultAsync(
             SendResult.Failure(SendErrorCode.TargetChanged));
 
-        var visualChanged = delay.Changed;
         delay.CompleteOccurrence(TimeSpan.FromMilliseconds(650), occurrence: 1);
-        await visualChanged;
+        delay.CompleteOccurrence(TimeSpan.FromMilliseconds(2500), occurrence: 1);
+        await first;
         Assert.Equal(ButtonFeedbackVisual.Failure, view.Visual);
         Assert.Equal("焦点已变化，未发送", view.ToolTip);
 
+        var idle = view.WaitForVisual(ButtonFeedbackVisual.Idle);
+        var tooltipCleared = view.WaitForToolTip(message: null);
         delay.CompleteOccurrence(TimeSpan.FromMilliseconds(900), occurrence: 1);
-        delay.CompleteOccurrence(TimeSpan.FromMilliseconds(2500), occurrence: 1);
         delay.CompleteOccurrence(TimeSpan.FromMilliseconds(2500), occurrence: 2);
-        await Task.WhenAll(first, second);
+        await idle;
+        await tooltipCleared;
+        await second;
         Assert.Equal(ButtonFeedbackVisual.Idle, view.Visual);
         Assert.Null(view.ToolTip);
+    }
+
+    [Fact]
+    public async Task Repeated_feedback_waits_for_view_continuations_without_sleep()
+    {
+        const int repetitions = 100;
+        var view = new RecordingFeedbackView();
+        var delay = new ManualFeedbackDelay();
+        using var controller = new ButtonFeedbackController(view, delay, animationsEnabled: true);
+
+        for (var index = 1; index <= repetitions; index++)
+        {
+            var sequence = controller.ShowResultAsync(SendResult.Success());
+            var idle = view.WaitForVisual(ButtonFeedbackVisual.Idle);
+            var tooltipCleared = view.WaitForToolTip(message: null);
+
+            delay.CompleteOccurrence(ButtonFeedbackController.SuccessDuration, index);
+            await idle;
+            delay.CompleteOccurrence(ButtonFeedbackController.ToolTipDuration, index);
+            await tooltipCleared;
+            await sequence;
+
+            Assert.Equal(ButtonFeedbackVisual.Idle, view.Visual);
+            Assert.Null(view.ToolTip);
+        }
     }
 
     [Fact]
@@ -258,6 +290,10 @@ public sealed class ButtonFeedbackControllerTests
 
     private sealed class RecordingFeedbackView : IButtonFeedbackView
     {
+        private readonly object _gate = new();
+        private readonly List<VisualWaiter> _visualWaiters = [];
+        private readonly List<ToolTipWaiter> _toolTipWaiters = [];
+
         public ButtonFeedbackVisual Visual { get; private set; }
 
         public double Scale { get; private set; } = 1;
@@ -268,20 +304,82 @@ public sealed class ButtonFeedbackControllerTests
 
         public List<string> AccessibilityMessages { get; } = [];
 
+        public Task WaitForVisual(ButtonFeedbackVisual visual)
+        {
+            lock (_gate)
+            {
+                var completion = NewCompletion();
+                _visualWaiters.Add(new(visual, completion));
+                return completion.Task;
+            }
+        }
+
+        public Task WaitForToolTip(string? message)
+        {
+            lock (_gate)
+            {
+                var completion = NewCompletion();
+                _toolTipWaiters.Add(new(message, completion));
+                return completion.Task;
+            }
+        }
+
         public void ApplyVisual(
             ButtonFeedbackVisual visual,
             double scale,
             bool animate)
         {
-            Visual = visual;
-            Scale = scale;
-            LastAnimate = animate;
+            TaskCompletionSource[] changed;
+            lock (_gate)
+            {
+                Visual = visual;
+                Scale = scale;
+                LastAnimate = animate;
+                changed = _visualWaiters
+                    .Where(waiter => waiter.Visual == visual)
+                    .Select(waiter => waiter.Completion)
+                    .ToArray();
+                _visualWaiters.RemoveAll(waiter => waiter.Visual == visual);
+            }
+
+            foreach (var completion in changed)
+            {
+                completion.TrySetResult();
+            }
         }
 
-        public void SetToolTip(string? message) => ToolTip = message;
+        public void SetToolTip(string? message)
+        {
+            TaskCompletionSource[] changed;
+            lock (_gate)
+            {
+                ToolTip = message;
+                changed = _toolTipWaiters
+                    .Where(waiter => waiter.Message == message)
+                    .Select(waiter => waiter.Completion)
+                    .ToArray();
+                _toolTipWaiters.RemoveAll(waiter => waiter.Message == message);
+            }
+
+            foreach (var completion in changed)
+            {
+                completion.TrySetResult();
+            }
+        }
 
         public void PublishAccessibility(string message) =>
             AccessibilityMessages.Add(message);
+
+        private static TaskCompletionSource NewCompletion() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private sealed record VisualWaiter(
+            ButtonFeedbackVisual Visual,
+            TaskCompletionSource Completion);
+
+        private sealed record ToolTipWaiter(
+            string? Message,
+            TaskCompletionSource Completion);
     }
 
     private sealed class RecordingAutomationEventSink : IKeAutomationEventSink
@@ -315,7 +413,6 @@ public sealed class ButtonFeedbackControllerTests
     {
         private readonly object _gate = new();
         private readonly List<DelayRequest> _requests = [];
-        private TaskCompletionSource _changed = NewCompletion();
 
         public IReadOnlyList<TimeSpan> Requested
         {
@@ -324,17 +421,6 @@ public sealed class ButtonFeedbackControllerTests
                 lock (_gate)
                 {
                     return _requests.Select(request => request.Duration).ToArray();
-                }
-            }
-        }
-
-        public Task Changed
-        {
-            get
-            {
-                lock (_gate)
-                {
-                    return _changed.Task;
                 }
             }
         }
@@ -361,13 +447,8 @@ public sealed class ButtonFeedbackControllerTests
                     .Where(candidate => candidate.Duration == duration)
                     .ElementAt(occurrence - 1);
                 request.Completion.TrySetResult();
-                _changed.TrySetResult();
-                _changed = NewCompletion();
             }
         }
-
-        private static TaskCompletionSource NewCompletion() =>
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         private sealed record DelayRequest(TimeSpan Duration, TaskCompletionSource Completion);
     }
