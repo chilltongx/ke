@@ -23,6 +23,25 @@ public sealed class DraftPolicyTests
             DraftPolicy.Classify("\r\n", new HashSet<string> { "\r\n" }).State);
 
     [Fact]
+    public void Carriage_return_line_feed_without_explicit_artifact_is_present() =>
+        Assert.Equal(DraftState.Present, DraftPolicy.Classify("\r\n", NoArtifacts).State);
+
+    [Fact]
+    public void Empty_text_is_empty_without_an_artifact() =>
+        Assert.Equal(DraftState.Empty, DraftPolicy.Classify(string.Empty, NoArtifacts).State);
+
+    [Fact]
+    public void Maximum_length_text_is_present_and_next_length_is_unreadable()
+    {
+        Assert.Equal(
+            DraftState.Present,
+            DraftPolicy.Classify(new string('x', 4096), NoArtifacts).State);
+        Assert.Equal(
+            DraftState.Unreadable,
+            DraftPolicy.Classify(new string('x', 4097), NoArtifacts).State);
+    }
+
+    [Fact]
     public void Null_or_over_limit_text_is_unreadable()
     {
         Assert.Equal(DraftState.Unreadable, DraftPolicy.Classify(null, NoArtifacts).State);

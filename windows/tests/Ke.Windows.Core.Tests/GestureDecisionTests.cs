@@ -21,4 +21,12 @@ public sealed class GestureDecisionTests
         var tracker = new GestureTracker(new DipPoint(0, 0), 6);
         Assert.Equal(GestureDecision.Click, tracker.Release());
     }
+
+    [Fact]
+    public void Exactly_six_dip_remains_pending_and_releases_as_click()
+    {
+        var tracker = new GestureTracker(new DipPoint(0, 0), 6);
+        Assert.Equal(GestureDecision.Pending, tracker.MoveTo(new DipPoint(6, 0)));
+        Assert.Equal(GestureDecision.Click, tracker.Release());
+    }
 }
