@@ -14,6 +14,9 @@ public static class PortablePeVerifier
     private const int GroupIconResourceType = 14;
     private static readonly byte[] PngSignature =
         { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+    private static readonly byte[] IhdrChunkType = Encoding.ASCII.GetBytes("IHDR");
+    private static readonly byte[] IdatChunkType = Encoding.ASCII.GetBytes("IDAT");
+    private static readonly byte[] IendChunkType = Encoding.ASCII.GetBytes("IEND");
     private static readonly int[] ExpectedIconSizes = { 16, 24, 32, 48, 64, 128, 256 };
 
     public static void Verify(string executable)
@@ -34,6 +37,9 @@ public static class PortablePeVerifier
         ExpectRejected("declared optional-header boundary", valid.Mutate(bytes =>
             WriteUInt16(bytes, valid.CoffHeaderOffset + 16, 70)));
 
+        ExpectRejected("data-directory count exceeds optional header", valid.Mutate(bytes =>
+            WriteUInt32(bytes, valid.DataDirectoryCountOffset, uint.MaxValue)));
+
         ExpectRejected("resource RVA outside raw section bounds", valid.Mutate(bytes =>
             WriteUInt32(bytes, valid.ResourceDirectoryEntryOffset, 0x1FF0)));
 
@@ -45,6 +51,27 @@ public static class PortablePeVerifier
 
         ExpectRejected("RT_ICON PNG IHDR dimensions disagree with group icon", valid.Mutate(bytes =>
             WriteBigEndianUInt32(bytes, valid.FirstPngFileOffset + 16, 17)));
+
+        ExpectRejected("RT_ICON PNG has a bad IHDR CRC", valid.Mutate(bytes =>
+            bytes[valid.FirstPngFileOffset + 29] ^= 0x01));
+
+        ExpectRejected("RT_ICON PNG is missing IEND", valid.Mutate(bytes =>
+        {
+            var lengthWithoutIend = checked((uint)(
+                valid.FirstPngIendFileOffset - valid.FirstPngFileOffset));
+            WriteUInt32(bytes, valid.GroupDataFileOffset + 6 + 8, lengthWithoutIend);
+            WriteUInt32(bytes, valid.FirstIconDataEntryFileOffset + 4, lengthWithoutIend);
+        }));
+
+        ExpectRejected("RT_ICON PNG has a truncated IEND chunk", valid.Mutate(bytes =>
+            WriteBigEndianUInt32(bytes, valid.FirstPngIendFileOffset, 1)));
+
+        ExpectRejected("RT_ICON PNG has bytes after IEND", valid.Mutate(bytes =>
+        {
+            var lengthWithTrailingByte = checked((uint)(valid.FirstPngLength + 1));
+            WriteUInt32(bytes, valid.GroupDataFileOffset + 6 + 8, lengthWithTrailingByte);
+            WriteUInt32(bytes, valid.FirstIconDataEntryFileOffset + 4, lengthWithTrailingByte);
+        }));
 
         ExpectRejected("RT_ICON data entry points outside resource raw data", valid.Mutate(bytes =>
             WriteUInt32(bytes, valid.FirstIconDataEntryFileOffset, 0x1FF0)));
@@ -119,6 +146,14 @@ public static class PortablePeVerifier
         if (dataDirectoryCount <= 2)
         {
             throw new InvalidDataException("PE resource data directory is missing");
+        }
+
+        var declaredDataDirectoryEnd = 112UL + ((ulong)dataDirectoryCount * 8UL);
+        var declaredOptionalSize = checked((ulong)(optionalEnd - optionalOffset));
+        if (declaredDataDirectoryEnd > declaredOptionalSize)
+        {
+            throw new InvalidDataException(
+                "PE data-directory count exceeds declared optional-header boundary");
         }
 
         var resourceDirectoryEntry = GetOptionalFieldOffset(
@@ -237,18 +272,138 @@ public static class PortablePeVerifier
 
     private static void VerifyPng(byte[] data, int expectedWidth, int expectedHeight)
     {
-        if (data.Length < 33 || !data.AsSpan(0, PngSignature.Length).SequenceEqual(PngSignature))
+        if (data.Length < PngSignature.Length + 12 ||
+            !data.AsSpan(0, PngSignature.Length).SequenceEqual(PngSignature))
         {
             throw new InvalidDataException("RT_ICON must contain nonempty PNG data");
         }
 
-        if (ReadBigEndianUInt32(data, 8) != 13 ||
-            !data.AsSpan(12, 4).SequenceEqual(Encoding.ASCII.GetBytes("IHDR")) ||
-            ReadBigEndianUInt32(data, 16) != expectedWidth ||
-            ReadBigEndianUInt32(data, 20) != expectedHeight)
+        var offset = PngSignature.Length;
+        var chunkIndex = 0;
+        var sawIhdr = false;
+        var sawIdat = false;
+        var idatSequenceEnded = false;
+        var sawIend = false;
+        while (offset < data.Length)
         {
-            throw new InvalidDataException("RT_ICON PNG IHDR dimensions are incorrect");
+            if (data.Length - offset < 12)
+            {
+                throw new InvalidDataException("RT_ICON PNG chunk is truncated");
+            }
+
+            var dataLength = ReadBigEndianUInt32(data, offset);
+            var chunkTotal = 12UL + dataLength;
+            if ((ulong)offset + chunkTotal > (ulong)data.Length || dataLength > int.MaxValue)
+            {
+                throw new InvalidDataException("RT_ICON PNG chunk exceeds data bounds");
+            }
+
+            var chunkDataLength = checked((int)dataLength);
+            var typeOffset = checked(offset + 4);
+            var chunkDataOffset = checked(offset + 8);
+            var crcOffset = checked(chunkDataOffset + chunkDataLength);
+            var type = data.AsSpan(typeOffset, 4);
+            if (!type.ToArray().All(value =>
+                    (value >= (byte)'A' && value <= (byte)'Z') ||
+                    (value >= (byte)'a' && value <= (byte)'z')))
+            {
+                throw new InvalidDataException("RT_ICON PNG chunk type is invalid");
+            }
+
+            var expectedCrc = ReadBigEndianUInt32(data, crcOffset);
+            var actualCrc = ComputePngCrc(data.AsSpan(typeOffset, 4 + chunkDataLength));
+            if (actualCrc != expectedCrc)
+            {
+                throw new InvalidDataException("RT_ICON PNG chunk CRC is incorrect");
+            }
+
+            var isIhdr = type.SequenceEqual(IhdrChunkType);
+            var isIdat = type.SequenceEqual(IdatChunkType);
+            var isIend = type.SequenceEqual(IendChunkType);
+            if (chunkIndex == 0 && !isIhdr)
+            {
+                throw new InvalidDataException("RT_ICON PNG IHDR must be the first chunk");
+            }
+
+            if (isIhdr)
+            {
+                if (sawIhdr || chunkIndex != 0 || dataLength != 13)
+                {
+                    throw new InvalidDataException("RT_ICON PNG must contain one leading IHDR");
+                }
+
+                if (ReadBigEndianUInt32(data, chunkDataOffset) != expectedWidth ||
+                    ReadBigEndianUInt32(data, chunkDataOffset + 4) != expectedHeight)
+                {
+                    throw new InvalidDataException("RT_ICON PNG IHDR dimensions are incorrect");
+                }
+
+                if (data[chunkDataOffset + 10] != 0 ||
+                    data[chunkDataOffset + 11] != 0 ||
+                    data[chunkDataOffset + 12] > 1)
+                {
+                    throw new InvalidDataException("RT_ICON PNG IHDR methods are invalid");
+                }
+
+                sawIhdr = true;
+            }
+            else if (!sawIhdr)
+            {
+                throw new InvalidDataException("RT_ICON PNG data precedes IHDR");
+            }
+
+            if (isIdat)
+            {
+                if (idatSequenceEnded)
+                {
+                    throw new InvalidDataException("RT_ICON PNG IDAT chunks must be consecutive");
+                }
+
+                sawIdat = true;
+            }
+            else if (sawIdat && !isIend)
+            {
+                idatSequenceEnded = true;
+            }
+
+            offset = checked(offset + (int)chunkTotal);
+            chunkIndex++;
+            if (isIend)
+            {
+                if (sawIend || dataLength != 0 || !sawIhdr || !sawIdat)
+                {
+                    throw new InvalidDataException("RT_ICON PNG IEND is invalid");
+                }
+
+                sawIend = true;
+                if (offset != data.Length)
+                {
+                    throw new InvalidDataException("RT_ICON PNG contains data after IEND");
+                }
+
+                break;
+            }
         }
+
+        if (!sawIhdr || !sawIdat || !sawIend)
+        {
+            throw new InvalidDataException("RT_ICON PNG chunk stream is incomplete");
+        }
+    }
+
+    private static uint ComputePngCrc(ReadOnlySpan<byte> bytes)
+    {
+        var crc = uint.MaxValue;
+        foreach (var value in bytes)
+        {
+            crc ^= value;
+            for (var bit = 0; bit < 8; bit++)
+            {
+                crc = (crc >> 1) ^ ((crc & 1) == 0 ? 0 : 0xEDB88320);
+            }
+        }
+
+        return ~crc;
     }
 
     private static int GetOptionalFieldOffset(
@@ -545,19 +700,26 @@ public static class PortablePeVerifier
             byte[] bytes,
             int groupDataFileOffset,
             int firstPngFileOffset,
+            int firstPngIendFileOffset,
+            int firstPngLength,
             int firstIconDataEntryFileOffset)
         {
             Bytes = bytes;
             GroupDataFileOffset = groupDataFileOffset;
             FirstPngFileOffset = firstPngFileOffset;
+            FirstPngIendFileOffset = firstPngIendFileOffset;
+            FirstPngLength = firstPngLength;
             FirstIconDataEntryFileOffset = firstIconDataEntryFileOffset;
         }
 
         public byte[] Bytes { get; }
         public int CoffHeaderOffset => PeOffset + 4;
+        public int DataDirectoryCountOffset => CoffHeaderOffset + 20 + 108;
         public int ResourceDirectoryEntryOffset => CoffHeaderOffset + 20 + 112 + (2 * 8);
         public int GroupDataFileOffset { get; }
         public int FirstPngFileOffset { get; }
+        public int FirstPngIendFileOffset { get; }
+        public int FirstPngLength { get; }
         public int FirstIconDataEntryFileOffset { get; }
 
         public byte[] Mutate(Action<byte[]> mutation)
@@ -602,6 +764,8 @@ public static class PortablePeVerifier
                 bytes,
                 ResourceRawOffset + fixture.GroupDataOffset,
                 ResourceRawOffset + fixture.FirstPngOffset,
+                ResourceRawOffset + fixture.FirstPngIendOffset,
+                fixture.FirstPngLength,
                 ResourceRawOffset + fixture.FirstIconDataEntryOffset);
         }
 
@@ -627,8 +791,9 @@ public static class PortablePeVerifier
             var groupDataEntry = Allocate(16);
 
             var pngs = ExpectedIconSizes.Select(CreatePng).ToArray();
-            var pngOffsets = pngs.Select(AddData).ToArray();
-            var groupBytes = CreateGroupIcon(pngs);
+            var pngOffsets = pngs.Select(png => AddData(png.Bytes)).ToArray();
+            var pngBytes = pngs.Select(png => png.Bytes).ToArray();
+            var groupBytes = CreateGroupIcon(pngBytes);
             var groupOffset = AddData(groupBytes);
 
             WriteDirectoryHeader(root, 0, 2);
@@ -642,7 +807,7 @@ public static class PortablePeVerifier
                 WriteDirectoryEntry(iconType + 16 + (index * 8), id, iconLanguages[index], true);
                 WriteDirectoryHeader(iconLanguages[index], 0, 1);
                 WriteDirectoryEntry(iconLanguages[index] + 16, 1033, iconDataEntries[index], false);
-                WriteDataEntry(iconDataEntries[index], pngOffsets[index], pngs[index].Length);
+                WriteDataEntry(iconDataEntries[index], pngOffsets[index], pngs[index].Bytes.Length);
             }
 
             WriteDirectoryHeader(groupType, 0, 1);
@@ -655,6 +820,8 @@ public static class PortablePeVerifier
                 _bytes.ToArray(),
                 groupOffset,
                 pngOffsets[0],
+                pngOffsets[0] + pngs[0].IendOffset,
+                pngs[0].Bytes.Length,
                 iconDataEntries[0]);
         }
 
@@ -698,17 +865,46 @@ public static class PortablePeVerifier
             WriteUInt32(_bytes, offset + 4, checked((uint)size));
         }
 
-        private static byte[] CreatePng(int size)
+        private static PngFixture CreatePng(int size)
         {
-            var png = new byte[33];
-            PngSignature.CopyTo(png, 0);
-            WriteBigEndianUInt32(png, 8, 13);
-            Encoding.ASCII.GetBytes("IHDR").CopyTo(png, 12);
-            WriteBigEndianUInt32(png, 16, checked((uint)size));
-            WriteBigEndianUInt32(png, 20, checked((uint)size));
-            png[24] = 8;
-            png[25] = 6;
-            return png;
+            var ihdr = new byte[13];
+            WriteBigEndianUInt32(ihdr, 0, checked((uint)size));
+            WriteBigEndianUInt32(ihdr, 4, checked((uint)size));
+            ihdr[8] = 8;
+            ihdr[9] = 6;
+
+            var scanlines = new byte[checked(size * ((size * 4) + 1))];
+            using var compressed = new MemoryStream();
+            using (var zlib = new System.IO.Compression.ZLibStream(
+                       compressed,
+                       System.IO.Compression.CompressionLevel.SmallestSize,
+                       leaveOpen: true))
+            {
+                zlib.Write(scanlines);
+            }
+
+            using var png = new MemoryStream();
+            png.Write(PngSignature);
+            WritePngChunk(png, IhdrChunkType, ihdr);
+            WritePngChunk(png, IdatChunkType, compressed.ToArray());
+            var iendOffset = checked((int)png.Position);
+            WritePngChunk(png, IendChunkType, Array.Empty<byte>());
+            return new PngFixture(png.ToArray(), iendOffset);
+        }
+
+        private static void WritePngChunk(MemoryStream stream, byte[] type, byte[] data)
+        {
+            var length = new byte[4];
+            WriteBigEndianUInt32(length, 0, checked((uint)data.Length));
+            stream.Write(length);
+            stream.Write(type);
+            stream.Write(data);
+            var crcInput = new byte[type.Length + data.Length];
+            type.CopyTo(crcInput, 0);
+            data.CopyTo(crcInput, type.Length);
+            var crc = new byte[4];
+            WriteBigEndianUInt32(crc, 0, ComputePngCrc(crcInput));
+            stream.Write(crc);
         }
 
         private static byte[] CreateGroupIcon(IReadOnlyList<byte[]> pngs)
@@ -765,5 +961,9 @@ public static class PortablePeVerifier
         byte[] Bytes,
         int GroupDataOffset,
         int FirstPngOffset,
+        int FirstPngIendOffset,
+        int FirstPngLength,
         int FirstIconDataEntryOffset);
+
+    private sealed record PngFixture(byte[] Bytes, int IendOffset);
 }
