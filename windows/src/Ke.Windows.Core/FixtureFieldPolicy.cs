@@ -1,4 +1,5 @@
 using System.IO;
+using System.Collections.ObjectModel;
 
 namespace Ke.Windows.Core;
 
@@ -38,6 +39,7 @@ public static class FixtureFieldPolicy
     private static readonly HashSet<string> AllowedAutomationIds = new(
     [
         "input-primary",
+        "workbench.panel.input",
         "container-primary",
         "terminal",
         "search",
@@ -48,6 +50,22 @@ public static class FixtureFieldPolicy
         "quick open"
     ],
         StringComparer.Ordinal);
+
+    private static readonly string[] ApprovedRoleTokenValues =
+    [
+        "chat", "conversation", "composer", "message", "copilot", "editor", "terminal",
+        "search", "settings", "command palette", "quick open", "approval", "聊天", "对话",
+        "消息", "编辑器", "终端", "搜索", "设置", "命令面板", "快速打开", "审批"
+    ];
+
+    private static readonly HashSet<string> AllowedRoleTokens = new(
+        ApprovedRoleTokenValues,
+        StringComparer.Ordinal);
+
+    private static readonly ReadOnlyCollection<string> RoleTokens =
+        Array.AsReadOnly(ApprovedRoleTokenValues);
+
+    public static IReadOnlyList<string> ApprovedRoleTokens => RoleTokens;
 
     public static void ValidateMetadata(
         string application,
@@ -74,6 +92,36 @@ public static class FixtureFieldPolicy
             throw Rejected();
         }
     }
+
+    public static void ValidateElementSchema(
+        string controlType,
+        string className,
+        string automationId,
+        IReadOnlyList<string> genericRoleTokens,
+        string textShape,
+        string? emptyArtifactUtf16Hex,
+        bool requireEmptyComposer)
+    {
+        ValidateElementIdentifiers(controlType, className, automationId);
+        if (genericRoleTokens is null ||
+            genericRoleTokens.Distinct(StringComparer.Ordinal).Count() !=
+                genericRoleTokens.Count ||
+            genericRoleTokens.Any(token => !AllowedRoleTokens.Contains(token)) ||
+            !IsValidTextPair(textShape, emptyArtifactUtf16Hex) ||
+            requireEmptyComposer && textShape == "non-empty")
+        {
+            throw Rejected();
+        }
+    }
+
+    private static bool IsValidTextPair(string textShape, string? artifact) =>
+        textShape switch
+        {
+            "empty" => artifact == string.Empty,
+            "contenteditable-break" => artifact is "000A" or "000D000A",
+            "non-empty" => artifact is null,
+            _ => false
+        };
 
     private static InvalidDataException Rejected() =>
         new("Fixture metadata contains an unreviewed value.");

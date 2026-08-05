@@ -38,13 +38,6 @@ internal static class FixtureJson
 
 internal static class FixtureSanitizer
 {
-    internal static readonly string[] AllowedRoleTokens =
-    [
-        "chat", "conversation", "composer", "message", "copilot", "editor", "terminal",
-        "search", "settings", "command palette", "quick open", "approval", "聊天", "对话",
-        "消息", "编辑器", "终端", "搜索", "设置", "命令面板", "快速打开", "审批"
-    ];
-
     public static SanitizedFixture Sanitize(
         FocusSnapshot snapshot,
         string application,
@@ -67,10 +60,6 @@ internal static class FixtureSanitizer
 
     private static SanitizedElement Sanitize(ElementSummary element, bool requireText)
     {
-        FixtureFieldPolicy.ValidateElementIdentifiers(
-            element.ControlType,
-            element.ClassName,
-            element.AutomationId);
         var (shape, artifact) = DescribeText(element.Text, requireText);
         var tokenSource = string.Join(
             ' ',
@@ -78,11 +67,11 @@ internal static class FixtureSanitizer
             element.ClassName,
             element.AutomationId,
             element.Name);
-        var tokens = AllowedRoleTokens
+        var tokens = FixtureFieldPolicy.ApprovedRoleTokens
             .Where(token => ContainsBoundedToken(tokenSource, token))
             .ToArray();
 
-        return new(
+        var sanitized = new SanitizedElement(
             element.ControlType,
             element.ClassName,
             element.AutomationId,
@@ -93,6 +82,15 @@ internal static class FixtureSanitizer
             element.IsReadOnly,
             shape,
             artifact);
+        FixtureFieldPolicy.ValidateElementSchema(
+            sanitized.ControlType,
+            sanitized.ClassName,
+            sanitized.AutomationId,
+            sanitized.GenericRoleTokens,
+            sanitized.TextShape,
+            sanitized.EmptyArtifactUtf16Hex,
+            requireEmptyComposer: false);
+        return sanitized;
     }
 
     private static (string Shape, string? Artifact) DescribeText(
@@ -328,21 +326,14 @@ internal static class FixtureLoader
 
     private static void ValidateElement(SanitizedElement element)
     {
-        FixtureFieldPolicy.ValidateElementIdentifiers(
+        FixtureFieldPolicy.ValidateElementSchema(
             element.ControlType,
             element.ClassName,
-            element.AutomationId);
-        if (element.GenericRoleTokens is null ||
-            element.GenericRoleTokens.Any(token =>
-                !FixtureSanitizer.AllowedRoleTokens.Contains(token, StringComparer.Ordinal)) ||
-            element.TextShape is not ("empty" or "contenteditable-break" or "non-empty") ||
-            element.TextShape == "empty" && element.EmptyArtifactUtf16Hex != "" ||
-            element.TextShape == "contenteditable-break" &&
-                element.EmptyArtifactUtf16Hex is not ("000A" or "000D000A") ||
-            element.TextShape == "non-empty" && element.EmptyArtifactUtf16Hex is not null)
-        {
-            throw InvalidFixture();
-        }
+            element.AutomationId,
+            element.GenericRoleTokens,
+            element.TextShape,
+            element.EmptyArtifactUtf16Hex,
+            requireEmptyComposer: false);
     }
 
     private static InvalidDataException InvalidFixture() =>

@@ -28,14 +28,6 @@ internal static class AdapterProfiles
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
     };
 
-    private static readonly HashSet<string> AllowedRoleTokens = new(
-    [
-        "chat", "conversation", "composer", "message", "copilot", "editor", "terminal",
-        "search", "settings", "command palette", "quick open", "approval", "聊天", "对话",
-        "消息", "编辑器", "终端", "搜索", "设置", "命令面板", "快速打开", "审批"
-    ],
-        StringComparer.Ordinal);
-
     internal static readonly AdapterProfile Codex = Load(
         "codex-chat-empty.json",
         "Codex.exe",
@@ -102,9 +94,7 @@ internal static class AdapterProfiles
             fixture.Focused is null ||
             fixture.Ancestors is null ||
             fixture.Nearby is null ||
-            string.IsNullOrEmpty(fixture.Focused.ControlType) ||
-            fixture.Focused.GenericRoleTokens is null ||
-            fixture.Focused.TextShape is not ("empty" or "contenteditable-break"))
+            string.IsNullOrEmpty(fixture.Focused.ControlType))
         {
             throw InvalidProfile();
         }
@@ -113,23 +103,26 @@ internal static class AdapterProfiles
             fixture.Application,
             fixture.ProcessImageName,
             fixture.Scenario);
-        foreach (var element in fixture.Ancestors
-                     .Prepend(fixture.Focused)
-                     .Concat(fixture.Nearby))
+        ValidateElement(fixture.Focused, requireEmptyComposer: true);
+        foreach (var element in fixture.Ancestors.Concat(fixture.Nearby))
         {
-            FixtureFieldPolicy.ValidateElementIdentifiers(
-                element.ControlType,
-                element.ClassName,
-                element.AutomationId);
-            if (element.GenericRoleTokens is null ||
-                element.GenericRoleTokens.Any(token => !AllowedRoleTokens.Contains(token)))
-            {
-                throw InvalidProfile();
-            }
+            ValidateElement(element, requireEmptyComposer: false);
         }
 
         _ = DecodeArtifact(fixture.Focused.EmptyArtifactUtf16Hex);
     }
+
+    internal static void ValidateElement(
+        ProfileElement element,
+        bool requireEmptyComposer) =>
+        FixtureFieldPolicy.ValidateElementSchema(
+            element.ControlType,
+            element.ClassName,
+            element.AutomationId,
+            element.GenericRoleTokens,
+            element.TextShape,
+            element.EmptyArtifactUtf16Hex,
+            requireEmptyComposer);
 
     private static string DecodeArtifact(string? artifact) => artifact switch
     {
@@ -150,7 +143,7 @@ internal static class AdapterProfiles
         IReadOnlyList<ProfileElement> Ancestors,
         IReadOnlyList<ProfileElement> Nearby);
 
-    private sealed record ProfileElement(
+    internal sealed record ProfileElement(
         string ControlType,
         string ClassName,
         string AutomationId,

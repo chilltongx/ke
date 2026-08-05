@@ -41,7 +41,7 @@ public sealed class FixtureFieldPolicyTests
     [Theory]
     [InlineData("ControlType.Edit", "Chrome_RenderWidgetHostHWND", "input-primary")]
     [InlineData("ControlType.Pane", "Chrome_WidgetWin_1", "container-primary")]
-    [InlineData("ControlType.Edit", "monaco-editor", "input-primary")]
+    [InlineData("ControlType.Edit", "monaco-editor", "workbench.panel.input")]
     [InlineData("ControlType.Pane", "part panel", "command palette")]
     public void Reviewed_technical_identifiers_are_allowed(
         string controlType,
@@ -73,4 +73,71 @@ public sealed class FixtureFieldPolicyTests
                 "Chrome_RenderWidgetHostHWND",
                 unsafeValue));
     }
+
+    [Theory]
+    [InlineData("empty", "")]
+    [InlineData("contenteditable-break", "000A")]
+    [InlineData("contenteditable-break", "000D000A")]
+    [InlineData("non-empty", null)]
+    public void Reviewed_text_shape_and_artifact_pairs_are_allowed(
+        string textShape,
+        string? artifact) =>
+        FixtureFieldPolicy.ValidateElementSchema(
+            "ControlType.Edit",
+            "Chrome_RenderWidgetHostHWND",
+            "input-primary",
+            ["chat", "composer"],
+            textShape,
+            artifact,
+            requireEmptyComposer: false);
+
+    [Theory]
+    [InlineData("empty", null)]
+    [InlineData("empty", "000A")]
+    [InlineData("contenteditable-break", "")]
+    [InlineData("contenteditable-break", "0041")]
+    [InlineData("contenteditable-break", "433A5C5573657273")]
+    [InlineData("contenteditable-break", "616C696365406578616D706C652E636F6D")]
+    [InlineData("contenteditable-break", "73656E642070726976617465206D657373616765")]
+    [InlineData("non-empty", "")]
+    [InlineData("unknown", null)]
+    public void Mismatched_or_arbitrary_artifacts_are_rejected(
+        string textShape,
+        string? artifact) =>
+        Assert.Throws<InvalidDataException>(() =>
+            FixtureFieldPolicy.ValidateElementSchema(
+                "ControlType.Edit",
+                "Chrome_RenderWidgetHostHWND",
+                "input-primary",
+                ["chat"],
+                textShape,
+                artifact,
+                requireEmptyComposer: false));
+
+    [Fact]
+    public void Positive_profile_focused_element_must_be_empty() =>
+        Assert.Throws<InvalidDataException>(() =>
+            FixtureFieldPolicy.ValidateElementSchema(
+                "ControlType.Edit",
+                "Chrome_RenderWidgetHostHWND",
+                "input-primary",
+                ["chat"],
+                "non-empty",
+                null,
+                requireEmptyComposer: true));
+
+    [Theory]
+    [InlineData("Chat")]
+    [InlineData("private message")]
+    [InlineData("account@example.com")]
+    public void Unreviewed_role_tokens_are_rejected(string token) =>
+        Assert.Throws<InvalidDataException>(() =>
+            FixtureFieldPolicy.ValidateElementSchema(
+                "ControlType.Edit",
+                "Chrome_RenderWidgetHostHWND",
+                "input-primary",
+                [token],
+                "empty",
+                "",
+                requireEmptyComposer: true));
 }
