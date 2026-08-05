@@ -109,10 +109,18 @@ internal static class AdapterProfiles
             throw InvalidProfile();
         }
 
+        FixtureFieldPolicy.ValidateMetadata(
+            fixture.Application,
+            fixture.ProcessImageName,
+            fixture.Scenario);
         foreach (var element in fixture.Ancestors
                      .Prepend(fixture.Focused)
                      .Concat(fixture.Nearby))
         {
+            FixtureFieldPolicy.ValidateElementIdentifiers(
+                element.ControlType,
+                element.ClassName,
+                element.AutomationId);
             if (element.GenericRoleTokens is null ||
                 element.GenericRoleTokens.Any(token => !AllowedRoleTokens.Contains(token)))
             {

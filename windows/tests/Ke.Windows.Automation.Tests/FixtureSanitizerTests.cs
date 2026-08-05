@@ -73,9 +73,43 @@ public sealed class FixtureSanitizerTests
         var result = FixtureSanitizer.Sanitize(
             Snapshot("", "chatter terminally settings-panel"),
             "codex",
-            "negative");
+            "settings");
 
-        Assert.Equal(["chat", "settings"], result.Focused.GenericRoleTokens);
+        Assert.Equal(["settings"], result.Focused.GenericRoleTokens);
+    }
+
+    [Theory]
+    [InlineData(true, @"C:\Users\alice\Widget")]
+    [InlineData(true, "alice@example.com")]
+    [InlineData(false, "/Users/alice/widget")]
+    [InlineData(false, "send this private message")]
+    public void Loader_rejects_tampered_technical_identifiers(
+        bool tamperClassName,
+        string unsafeValue)
+    {
+        var fixture = FixtureSanitizer.Sanitize(
+            Snapshot("", "chat composer"),
+            "codex",
+            "chat-empty");
+        fixture = fixture with
+        {
+            Focused = tamperClassName
+                ? fixture.Focused with { ClassName = unsafeValue }
+                : fixture.Focused with { AutomationId = unsafeValue }
+        };
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"ke-tampered-fixture-{Guid.NewGuid():N}.json");
+
+        try
+        {
+            File.WriteAllText(path, JsonSerializer.Serialize(fixture, FixtureJson.Options));
+            Assert.Throws<InvalidDataException>(() => FixtureLoader.Load(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     private static FocusSnapshot Snapshot(string? text, string name) => new(
@@ -88,7 +122,7 @@ public sealed class FixtureSanitizerTests
             "private.runtime.id",
             "ControlType.Edit",
             "Chrome_RenderWidgetHostHWND",
-            "chat-input",
+            "input-primary",
             name,
             IsEnabled: true,
             IsKeyboardFocusable: true,

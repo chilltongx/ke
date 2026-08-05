@@ -52,6 +52,10 @@ internal static class FixtureSanitizer
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(application);
         ArgumentException.ThrowIfNullOrWhiteSpace(scenario);
+        FixtureFieldPolicy.ValidateMetadata(
+            application,
+            snapshot.ProcessImageName,
+            scenario);
         return new(
             application,
             snapshot.ProcessImageName,
@@ -63,6 +67,10 @@ internal static class FixtureSanitizer
 
     private static SanitizedElement Sanitize(ElementSummary element, bool requireText)
     {
+        FixtureFieldPolicy.ValidateElementIdentifiers(
+            element.ControlType,
+            element.ClassName,
+            element.AutomationId);
         var (shape, artifact) = DescribeText(element.Text, requireText);
         var tokenSource = string.Join(
             ' ',
@@ -302,12 +310,15 @@ internal static class FixtureLoader
     {
         if (fixture.Application is not ("codex" or "visual-studio-code") ||
             string.IsNullOrWhiteSpace(fixture.Scenario) ||
-            fixture.ProcessImageName != ExpectedProcess(fixture.Application) ||
             fixture.Focused is null || fixture.Ancestors is null || fixture.Nearby is null)
         {
             throw InvalidFixture();
         }
 
+        FixtureFieldPolicy.ValidateMetadata(
+            fixture.Application,
+            fixture.ProcessImageName,
+            fixture.Scenario);
         ValidateElement(fixture.Focused);
         foreach (var element in fixture.Ancestors.Concat(fixture.Nearby))
         {
@@ -317,6 +328,10 @@ internal static class FixtureLoader
 
     private static void ValidateElement(SanitizedElement element)
     {
+        FixtureFieldPolicy.ValidateElementIdentifiers(
+            element.ControlType,
+            element.ClassName,
+            element.AutomationId);
         if (element.GenericRoleTokens is null ||
             element.GenericRoleTokens.Any(token =>
                 !FixtureSanitizer.AllowedRoleTokens.Contains(token, StringComparer.Ordinal)) ||
@@ -329,13 +344,6 @@ internal static class FixtureLoader
             throw InvalidFixture();
         }
     }
-
-    private static string ExpectedProcess(string application) => application switch
-    {
-        "codex" => "Codex.exe",
-        "visual-studio-code" => "Code.exe",
-        _ => throw InvalidFixture()
-    };
 
     private static InvalidDataException InvalidFixture() =>
         new("The sanitized fixture is malformed or contains a non-allowlisted value.");

@@ -71,7 +71,74 @@ public sealed class FixtureCaptureWriterTests
         Assert.Equal(JsonValueKind.Object, json.RootElement.ValueKind);
     }
 
-    private static FocusSnapshot Snapshot(string process) => new(
+    [Fact]
+    public void Unknown_scenario_is_rejected_before_touching_output()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "fixture.json");
+        File.WriteAllText(path, "unchanged");
+
+        Assert.Throws<InvalidDataException>(() => FixtureCapture.Write(
+            Snapshot("Codex.exe"),
+            "Codex.exe",
+            "codex",
+            "private-message",
+            path,
+            append: false));
+
+        Assert.Equal("unchanged", File.ReadAllText(path));
+    }
+
+    [Theory]
+    [InlineData(@"C:\Users\alice\Widget")]
+    [InlineData("/Users/alice/widget")]
+    [InlineData("alice@example.com")]
+    [InlineData("DESKTOP-ABC123")]
+    [InlineData("alice-account")]
+    [InlineData("send this private message")]
+    public void Unsafe_class_name_is_rejected_before_file_creation(string unsafeValue)
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "fixture.json");
+
+        Assert.Throws<InvalidDataException>(() => FixtureCapture.Write(
+            Snapshot("Codex.exe", className: unsafeValue),
+            "Codex.exe",
+            "codex",
+            "chat-empty",
+            path,
+            append: false));
+
+        Assert.False(File.Exists(path));
+    }
+
+    [Theory]
+    [InlineData(@"C:\Users\alice\Widget")]
+    [InlineData("/Users/alice/widget")]
+    [InlineData("alice@example.com")]
+    [InlineData("DESKTOP-ABC123")]
+    [InlineData("alice-account")]
+    [InlineData("send this private message")]
+    public void Unsafe_automation_id_is_rejected_before_file_creation(string unsafeValue)
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "fixture.json");
+
+        Assert.Throws<InvalidDataException>(() => FixtureCapture.Write(
+            Snapshot("Codex.exe", automationId: unsafeValue),
+            "Codex.exe",
+            "codex",
+            "chat-empty",
+            path,
+            append: false));
+
+        Assert.False(File.Exists(path));
+    }
+
+    private static FocusSnapshot Snapshot(
+        string process,
+        string className = "Chrome_RenderWidgetHostHWND",
+        string automationId = "input-primary") => new(
         (nint)1,
         2,
         process,
@@ -80,8 +147,8 @@ public sealed class FixtureCaptureWriterTests
         new ElementSummary(
             "private.runtime",
             "ControlType.Edit",
-            "TextBox",
-            "composer",
+            className,
+            automationId,
             "chat composer",
             true,
             true,
