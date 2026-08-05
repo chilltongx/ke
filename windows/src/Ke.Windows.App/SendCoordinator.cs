@@ -6,13 +6,62 @@ namespace Ke.Windows.App;
 
 public interface ISendDeadline
 {
-    Task WaitAsync(TimeSpan duration, CancellationToken cancellationToken);
+    Task WaitAsync(
+        TimeSpan duration,
+        Action onExpired,
+        CancellationToken cancellationToken);
 }
 
 public sealed class SystemSendDeadline : ISendDeadline
 {
-    public Task WaitAsync(TimeSpan duration, CancellationToken cancellationToken) =>
-        Task.Delay(duration, cancellationToken);
+    public async Task WaitAsync(
+        TimeSpan duration,
+        Action onExpired,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(onExpired);
+
+        var completion = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var completed = 0;
+        using var timer = new System.Threading.Timer(
+            _ =>
+            {
+                if (Interlocked.CompareExchange(ref completed, 1, 0) != 0)
+                {
+                    return;
+                }
+
+                try
+                {
+                    onExpired();
+                    completion.TrySetResult();
+                }
+                catch (Exception exception)
+                {
+                    completion.TrySetException(exception);
+                }
+            },
+            state: null,
+            Timeout.InfiniteTimeSpan,
+            Timeout.InfiniteTimeSpan);
+        using var registration = cancellationToken.UnsafeRegister(
+            _ =>
+            {
+                if (Interlocked.CompareExchange(ref completed, 1, 0) == 0)
+                {
+                    completion.TrySetCanceled(cancellationToken);
+                }
+            },
+            state: null);
+
+        if (Volatile.Read(ref completed) == 0)
+        {
+            timer.Change(duration, Timeout.InfiniteTimeSpan);
+        }
+
+        await completion.Task.ConfigureAwait(false);
+    }
 }
 
 public interface IUiCallbackDispatcher
@@ -130,7 +179,9 @@ public sealed class SendCoordinator : IDisposable
             CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
 
         Task<SendResult> worker = StartWorker(workerCancellation.Token);
-        Task deadline = StartDeadline(deadlineCancellation.Token);
+        Task deadline = StartDeadline(
+            workerCancellation.Cancel,
+            deadlineCancellation.Token);
         try
         {
             var completed = await _completionRace
@@ -183,11 +234,16 @@ public sealed class SendCoordinator : IDisposable
         }
     }
 
-    private Task StartDeadline(CancellationToken cancellationToken)
+    private Task StartDeadline(
+        Action onExpired,
+        CancellationToken cancellationToken)
     {
         try
         {
-            return _deadline.WaitAsync(SendTimeout, cancellationToken);
+            return _deadline.WaitAsync(
+                SendTimeout,
+                onExpired,
+                cancellationToken);
         }
         catch (Exception exception)
         {

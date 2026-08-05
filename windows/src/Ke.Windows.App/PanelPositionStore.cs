@@ -1,5 +1,6 @@
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security;
 using System.Text.Json;
 using Ke.Windows.Core;
 
@@ -89,6 +90,22 @@ public sealed class PanelPositionStore
     }
 
     private void WriteAtomically(SavedPanelPosition saved)
+    {
+        try
+        {
+            WriteAtomicallyCore(saved);
+        }
+        catch (Exception exception) when (exception is IOException
+            or UnauthorizedAccessException
+            or SecurityException
+            or ArgumentException
+            or NotSupportedException)
+        {
+            // Keep the current in-memory window position when persistence is unavailable.
+        }
+    }
+
+    private void WriteAtomicallyCore(SavedPanelPosition saved)
     {
         var directory = Path.GetDirectoryName(_settingsPath)
             ?? throw new InvalidOperationException("Settings path must have a parent directory.");

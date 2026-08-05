@@ -3,15 +3,18 @@ name: Windows CI
 on:
   push:
     branches:
+      - "main"
       - "feat/**"
       - "feature/**"
     paths:
       - "windows/**"
       - ".github/workflows/windows-ci.yml"
+      - ".github/workflows/windows-release.yml"
   pull_request:
     paths:
       - "windows/**"
       - ".github/workflows/windows-ci.yml"
+      - ".github/workflows/windows-release.yml"
 
 permissions:
   contents: read

@@ -232,6 +232,36 @@ public sealed class SendCoordinatorTests
         Assert.Equal(SendErrorCode.AutomationTimeout, Assert.Single(reports).Error);
     }
 
+    [Fact]
+    public async Task Deadline_expiry_cancels_queued_worker_before_coordinator_continuation()
+    {
+        var sender = new CountingSender();
+        var dispatcher = new PausedAutomationDispatcher();
+        var deadline = new ManualDeadline();
+        var race = new ManualCompletionRace();
+        using var coordinator = new SendCoordinator(
+            dispatcher,
+            sender,
+            deadline,
+            new RecordingUiDispatcher(),
+            race);
+
+        var running = coordinator.TryStartAsync(_ => Task.CompletedTask);
+        await dispatcher.Queued;
+        await race.Registered;
+
+        deadline.Expire();
+        await race.DeadlineCompleted;
+
+        Assert.True(dispatcher.CancellationRequested);
+        dispatcher.Release();
+        Assert.Equal(0, sender.Attempts);
+
+        race.Decide(SendCompletion.Deadline);
+        race.Release();
+        Assert.True(await running);
+    }
+
     private static SendCoordinator Create(
         ControlledSender sender,
         ManualDeadline deadline,
@@ -341,17 +371,78 @@ public sealed class SendCoordinatorTests
         }
     }
 
+    private sealed class PausedAutomationDispatcher : IAutomationDispatcher
+    {
+        private readonly TaskCompletionSource _queued =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private Func<CancellationToken, SendResult>? _work;
+        private TaskCompletionSource<SendResult>? _result;
+        private CancellationToken _token;
+
+        public Task Queued => _queued.Task;
+
+        public bool CancellationRequested => _token.IsCancellationRequested;
+
+        public Task<T> InvokeAsync<T>(
+            Func<CancellationToken, T> work,
+            CancellationToken cancellationToken)
+        {
+            Assert.Null(_work);
+            _work = token => (SendResult)(object)work(token)!;
+            _token = cancellationToken;
+            _result = new TaskCompletionSource<SendResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _queued.TrySetResult();
+            return (Task<T>)(object)_result.Task;
+        }
+
+        public void Release()
+        {
+            var result = _result ?? throw new InvalidOperationException("No work is queued.");
+            if (_token.IsCancellationRequested)
+            {
+                result.TrySetCanceled(_token);
+                return;
+            }
+
+            var work = _work ?? throw new InvalidOperationException("No work is queued.");
+            result.TrySetResult(work(_token));
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class CountingSender : IFocusedChatSender
+    {
+        private int _attempts;
+
+        public int Attempts => Volatile.Read(ref _attempts);
+
+        public SendResult TrySend(CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _attempts);
+            return SendResult.Success();
+        }
+    }
+
     private sealed class ManualDeadline : ISendDeadline
     {
         private readonly TaskCompletionSource _expired =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private Action? _onExpired;
         public TimeSpan RequestedDuration { get; private set; }
 
         public bool WasCancelled { get; private set; }
 
-        public async Task WaitAsync(TimeSpan duration, CancellationToken cancellationToken)
+        public async Task WaitAsync(
+            TimeSpan duration,
+            Action onExpired,
+            CancellationToken cancellationToken)
         {
             RequestedDuration = duration;
+            _onExpired = onExpired;
             try
             {
                 await _expired.Task.WaitAsync(cancellationToken);
@@ -363,7 +454,13 @@ public sealed class SendCoordinatorTests
             }
         }
 
-        public void Expire() => _expired.TrySetResult();
+        public void Expire()
+        {
+            var onExpired = _onExpired
+                ?? throw new InvalidOperationException("Deadline is not registered.");
+            onExpired();
+            _expired.TrySetResult();
+        }
     }
 
     private sealed class RecordingUiDispatcher : IUiCallbackDispatcher
