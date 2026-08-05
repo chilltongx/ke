@@ -6,7 +6,7 @@
 
 **Architecture:** Windows 版放在独立 `windows/` 目录，以 .NET 10、WPF、Microsoft UI Automation 和 Win32 实现，不改动现有 Swift/macOS 构建。WPF UI 线程只显示按钮和反馈；一个长期存活的 MTA 自动化线程串行执行有界焦点快照、应用适配、安全复核、写入和 Enter，任何不确定状态失败关闭。
 
-**Tech Stack:** C#、.NET 10 LTS、WPF、System.Windows.Automation、Win32 P/Invoke、xUnit 2.9.3、Microsoft.NET.Test.Sdk 18.8.1、PowerShell 7。
+**Tech Stack:** C#、.NET 10 LTS、WPF、System.Windows.Automation、Win32 P/Invoke、xUnit 2.9.3、Microsoft.NET.Test.Sdk 18.8.1、PowerShell 7、GitHub Actions Windows runner。
 
 ## Global Constraints
 
@@ -21,6 +21,7 @@
 - 目标完整性级别高于本进程时，在遍历 UIA 树前返回 `elevatedTarget`，不请求管理员权限。
 - 发布物为 self-contained、single-file、`win-x64`、`PublishTrimmed=false` 的便携 ZIP；无安装器、无预装 .NET 要求。
 - Release 日志不得包含窗口标题、输入内容、文件路径、账号信息或 UIA 树。
+- 每次推送 Windows 代码时由 GitHub Actions `windows-latest` + `.NET SDK 10.0.302` 运行完整 solution 测试；最终便携 ZIP/EXE 通过 GitHub Release 提供。
 - NuGet 版本固定为 [xUnit 2.9.3](https://www.nuget.org/packages/xunit/2.9.3)、[xunit.runner.visualstudio 3.1.5](https://www.nuget.org/packages/xunit.runner.visualstudio/3.1.5) 和 [Microsoft.NET.Test.Sdk 18.8.1](https://www.nuget.org/packages/Microsoft.NET.Test.Sdk/18.8.1)。
 
 ---
@@ -96,6 +97,8 @@ windows/
         └── MainWindow.xaml.cs
 ```
 
+仓库根目录同时包含 `.github/workflows/windows-ci.yml`；Task 9 再增加 Release workflow。
+
 `Ke.Windows.Core` 不引用 WPF、UI Automation 或 Win32。`Ke.Windows.Automation` 持有全部系统对象与输入副作用。`Ke.Windows.App` 只组合服务、展示状态和保存窗口位置。fixture 是去标识化测试数据，不是运行时用户数据。
 
 ---
@@ -115,6 +118,7 @@ windows/
 - Create: `windows/tests/Ke.Windows.Core.Tests/ProductInfoTests.cs`
 - Create: `windows/tests/Ke.Windows.Automation.Tests/Ke.Windows.Automation.Tests.csproj`
 - Create: `windows/tests/Ke.Windows.IntegrationHarness/Ke.Windows.IntegrationHarness.csproj`
+- Create: `.github/workflows/windows-ci.yml`
 
 **Interfaces:**
 - Consumes: .NET 10 SDK on Windows 11 x64.
@@ -212,6 +216,8 @@ Automation 项目增加 `<UseWPF>true</UseWPF>`，App 与 IntegrationHarness 保
 
 `ApplicationIcon` 在 Task 9 生成 `App.ico` 后加入，避免工程骨架首次编译引用尚不存在的文件。
 
+`.github/workflows/windows-ci.yml` 使用 `windows-latest`、`actions/checkout@v6`、`actions/setup-dotnet@v6`，安装 `10.0.302`，执行 `dotnet test windows/Ke.Windows.slnx -c Release`；触发条件为 feature branch/PR 中 `windows/**` 或该 workflow 自身变化，只授予 `contents: read`。
+
 - [ ] **Step 3: 写入失败 smoke test**
 
 `windows/tests/Ke.Windows.Core.Tests/ProductInfoTests.cs`：
@@ -256,14 +262,14 @@ public static class ProductInfo
 
 - [ ] **Step 6: 验证 solution 基线**
 
-Run: `dotnet test windows/Ke.Windows.slnx -c Release`
+本地临时 `.NET 10` SDK 运行 Core GREEN 后推送 feature branch；GitHub Actions Windows runner 执行：`dotnet test windows/Ke.Windows.slnx -c Release`。
 
-Expected: PASS；`ProductInfoTests` 2 个断言通过，0 warnings，0 errors。
+Expected: CI PASS；`ProductInfoTests` 2 个断言通过，0 warnings，0 errors。
 
 - [ ] **Step 7: 提交**
 
 ```bash
-git add windows/Ke.Windows.slnx windows/Directory.Build.props windows/Directory.Packages.props windows/.gitignore windows/src windows/tests
+git add .github/workflows/windows-ci.yml windows/Ke.Windows.slnx windows/Directory.Build.props windows/Directory.Packages.props windows/.gitignore windows/src windows/tests
 git commit -m "build(windows): Add .NET solution scaffold"
 ```
 
