@@ -1,0 +1,27 @@
+name: Windows CI
+
+on:
+  push:
+    branches:
+      - "feat/**"
+      - "feature/**"
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows-ci.yml"
+  pull_request:
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.302
+      - run: dotnet test windows/Ke.Windows.slnx -c Release

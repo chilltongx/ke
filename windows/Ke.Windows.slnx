@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Ke.Windows.Core/Ke.Windows.Core.csproj" />
+    <Project Path="src/Ke.Windows.Automation/Ke.Windows.Automation.csproj" />
+    <Project Path="src/Ke.Windows.App/Ke.Windows.App.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Ke.Windows.Core.Tests/Ke.Windows.Core.Tests.csproj" />
+    <Project Path="tests/Ke.Windows.Automation.Tests/Ke.Windows.Automation.Tests.csproj" />
+    <Project Path="tests/Ke.Windows.IntegrationHarness/Ke.Windows.IntegrationHarness.csproj" />
+  </Folder>
+</Solution>
