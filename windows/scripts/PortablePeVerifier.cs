@@ -37,6 +37,9 @@ public static class PortablePeVerifier
         var valid = TestPeImage.Create();
         VerifyImage(valid.Bytes);
         VerifyImage(TestPeImage.Create(splitIdat: true).Bytes);
+        ExpectRejected(
+            "RT_ICON PNG zlib stream has a duplicate Adler-32 trailer",
+            TestPeImage.Create(duplicateAdler: true).Bytes);
 
         ExpectRejected("declared optional-header boundary", valid.Mutate(bytes =>
             WriteUInt16(bytes, valid.CoffHeaderOffset + 16, 70)));
@@ -511,7 +514,7 @@ public static class PortablePeVerifier
 
         var decoded = new byte[checked(expectedLength + 1)];
         var decodedLength = 0;
-        using var input = new MemoryStream(compressed, writable: false);
+        using var input = new NonPrefetchingReadStream(compressed);
         using (var zlib = new System.IO.Compression.ZLibStream(
                    input,
                    System.IO.Compression.CompressionMode.Decompress,
@@ -529,7 +532,7 @@ public static class PortablePeVerifier
             }
         }
 
-        if (input.Position != input.Length)
+        if (input.Consumed != compressed.Length)
         {
             throw new InvalidDataException("RT_ICON PNG zlib stream has trailing compressed data");
         }
@@ -670,6 +673,71 @@ public static class PortablePeVerifier
             Require(offset, 4, "UInt32");
             return BinaryPrimitives.ReadUInt32LittleEndian(Bytes.AsSpan(offset, 4));
         }
+    }
+
+    private sealed class NonPrefetchingReadStream : Stream
+    {
+        private readonly byte[] _bytes;
+        private int _consumed;
+
+        public NonPrefetchingReadStream(byte[] bytes) =>
+            _bytes = bytes ?? throw new ArgumentNullException(nameof(bytes));
+
+        public int Consumed => _consumed;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            ArgumentNullException.ThrowIfNull(buffer);
+            if (offset < 0 || count < 0 || offset > buffer.Length - count)
+            {
+                throw new ArgumentOutOfRangeException(nameof(offset));
+            }
+
+            return Read(buffer.AsSpan(offset, count));
+        }
+
+        public override int Read(Span<byte> buffer)
+        {
+            if (buffer.IsEmpty || _consumed == _bytes.Length)
+            {
+                return 0;
+            }
+
+            buffer[0] = _bytes[_consumed++];
+            return 1;
+        }
+
+        public override int ReadByte()
+        {
+            if (_consumed == _bytes.Length)
+            {
+                return -1;
+            }
+
+            return _bytes[_consumed++];
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
     }
 
     private sealed record Section(
@@ -919,9 +987,14 @@ public static class PortablePeVerifier
             return copy;
         }
 
-        public static TestPeImage Create(bool splitIdat = false)
+        public static TestPeImage Create(
+            bool splitIdat = false,
+            bool duplicateAdler = false)
         {
-            var resource = new ResourceFixtureBuilder(ResourceRva, splitIdat);
+            var resource = new ResourceFixtureBuilder(
+                ResourceRva,
+                splitIdat,
+                duplicateAdler);
             var fixture = resource.Build();
             var rawSize = Align(fixture.Bytes.Length, 0x200);
             var bytes = new byte[checked(ResourceRawOffset + rawSize)];
@@ -969,12 +1042,17 @@ public static class PortablePeVerifier
     {
         private readonly uint _resourceRva;
         private readonly bool _splitIdat;
+        private readonly bool _duplicateAdler;
         private readonly List<byte> _bytes = new();
 
-        public ResourceFixtureBuilder(uint resourceRva, bool splitIdat)
+        public ResourceFixtureBuilder(
+            uint resourceRva,
+            bool splitIdat,
+            bool duplicateAdler)
         {
             _resourceRva = resourceRva;
             _splitIdat = splitIdat;
+            _duplicateAdler = duplicateAdler;
         }
 
         public ResourceFixture Build()
@@ -1087,6 +1165,15 @@ public static class PortablePeVerifier
             WritePngChunk(png, IhdrChunkType, ihdr);
             var idatChunkOffset = checked((int)png.Position);
             var compressedBytes = compressed.ToArray();
+            if (_duplicateAdler)
+            {
+                var duplicated = new byte[checked(compressedBytes.Length + 4)];
+                compressedBytes.CopyTo(duplicated, 0);
+                compressedBytes.AsSpan(compressedBytes.Length - 4, 4).CopyTo(
+                    duplicated.AsSpan(compressedBytes.Length, 4));
+                compressedBytes = duplicated;
+            }
+
             var firstIdatLength = compressedBytes.Length;
             if (_splitIdat)
             {
