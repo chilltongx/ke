@@ -1,8 +1,16 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, ParameterSetName = 'Verify')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'VerifyDirectory')]
     [ValidateNotNullOrEmpty()]
     [string]$DistDirectory,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'VerifyArchive')]
+    [ValidateNotNullOrEmpty()]
+    [string]$ArchivePath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'VerifyExecutable')]
+    [ValidateNotNullOrEmpty()]
+    [string]$Executable,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'SelfTest')]
     [switch]$SelfTest
@@ -13,8 +21,11 @@ $ErrorActionPreference = 'Stop'
 
 $expectedDescription = '向当前空聊天输入框安全发送“可”'
 $allowedNames = @('LICENSE', 'README.md', 'SHA256SUMS.txt', '可.exe')
-$peVerifierSource = Join-Path $PSScriptRoot 'PortablePeVerifier.cs'
-Add-Type -Path $peVerifierSource
+$verifierSources = @(
+    (Join-Path $PSScriptRoot 'PortablePeVerifier.cs'),
+    (Join-Path $PSScriptRoot 'PortableArchiveVerifier.cs')
+)
+Add-Type -Path $verifierSources
 
 function Assert-Condition {
     param(
@@ -140,20 +151,89 @@ function Assert-SingleInstanceAndCleanExit {
     }
 }
 
+function Assert-PortableDirectory {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+
+    $portableDirectory = Get-PortableDirectory $Directory
+    Assert-ExactInventory $portableDirectory
+
+    $portableExecutable = Join-Path $portableDirectory '可.exe'
+    $manifest = Join-Path $portableDirectory 'SHA256SUMS.txt'
+    Assert-Condition (Test-Path -LiteralPath $portableExecutable -PathType Leaf) '可.exe missing'
+    Assert-PeMetadata $portableExecutable
+    Assert-PortableHash -Executable $portableExecutable -Manifest $manifest
+    Assert-SingleInstanceAndCleanExit $portableExecutable
+}
+
+function Assert-PortableArchive {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $temporaryParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar)
+    Assert-Condition (Test-Path -LiteralPath $temporaryParent -PathType Container) `
+        'Temporary directory is missing'
+    $temporaryParentItem = Get-Item -LiteralPath $temporaryParent -Force
+    Assert-Condition (
+        ($temporaryParentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0
+    ) 'Temporary directory must not be a reparse point'
+
+    $extractionDirectory = [IO.Path]::GetFullPath((Join-Path `
+        $temporaryParent `
+        "ke-portable-verify-$([Guid]::NewGuid().ToString('N'))"))
+    Assert-Condition (
+        [string]::Equals(
+            [IO.Path]::GetDirectoryName($extractionDirectory),
+            $temporaryParent,
+            [StringComparison]::OrdinalIgnoreCase)
+    ) 'Archive extraction directory escaped the temporary directory'
+
+    [IO.Directory]::CreateDirectory($extractionDirectory) | Out-Null
+    try {
+        [PortableArchiveVerifier]::VerifyAndExtract($Path, $extractionDirectory)
+        Assert-PortableDirectory $extractionDirectory
+    }
+    finally {
+        if (Test-Path -LiteralPath $extractionDirectory) {
+            $cleanupPath = [IO.Path]::GetFullPath($extractionDirectory)
+            Assert-Condition (
+                [string]::Equals(
+                    $cleanupPath,
+                    $extractionDirectory,
+                    [StringComparison]::OrdinalIgnoreCase) -and
+                [string]::Equals(
+                    [IO.Path]::GetDirectoryName($cleanupPath),
+                    $temporaryParent,
+                    [StringComparison]::OrdinalIgnoreCase)
+            ) 'Refusing unsafe archive extraction cleanup target'
+            $cleanupItem = Get-Item -LiteralPath $cleanupPath -Force
+            Assert-Condition (
+                ($cleanupItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0
+            ) 'Refusing reparse-point archive extraction cleanup target'
+            Remove-Item -LiteralPath $cleanupPath -Recurse -Force
+        }
+    }
+}
+
 if ($SelfTest) {
     [PortablePeVerifier]::RunSelfTests()
-    Write-Host 'Portable PE verifier self-tests passed.'
+    [PortableArchiveVerifier]::RunSelfTests()
+    Write-Host 'Portable PE and archive verifier self-tests passed.'
     return
 }
 
-$portableDirectory = Get-PortableDirectory $DistDirectory
-Assert-ExactInventory $portableDirectory
+if ($PSCmdlet.ParameterSetName -eq 'VerifyExecutable') {
+    [PortablePeVerifier]::Verify($Executable)
+    Write-Host 'Portable Windows executable verified.'
+    return
+}
 
-$executable = Join-Path $portableDirectory '可.exe'
-$manifest = Join-Path $portableDirectory 'SHA256SUMS.txt'
-Assert-Condition (Test-Path -LiteralPath $executable -PathType Leaf) '可.exe missing'
-Assert-PeMetadata $executable
-Assert-PortableHash -Executable $executable -Manifest $manifest
-Assert-SingleInstanceAndCleanExit $executable
+if ($PSCmdlet.ParameterSetName -eq 'VerifyArchive') {
+    Assert-PortableArchive $ArchivePath
+    Write-Host 'Portable Windows ZIP verified.'
+    return
+}
+
+Assert-PortableDirectory $DistDirectory
 
 Write-Host 'Portable Windows package verified.'

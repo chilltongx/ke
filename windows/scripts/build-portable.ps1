@@ -177,7 +177,7 @@ try {
         [IO.Compression.CompressionLevel]::Optimal,
         $false)
 
-    & (Join-Path $PSScriptRoot 'verify-portable.ps1') -DistDirectory $stageDirectory
+    & (Join-Path $PSScriptRoot 'verify-portable.ps1') -ArchivePath $zipPath
 
     Write-Host "Portable package: $zipPath"
     Write-Host "SHA-256: $hash"

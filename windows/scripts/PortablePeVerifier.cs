@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 
 public static class PortablePeVerifier
 {
@@ -15,11 +16,23 @@ public static class PortablePeVerifier
     private const int MaximumIconDimension = 256;
     private const int MaximumDecodedRgbaBytes = 256 * ((256 * 4) + 1);
     private const int MaximumCompressedRgbaBytes = MaximumDecodedRgbaBytes + 65536;
+    private const int MaximumExecutableBytes = 768 * 1024 * 1024;
+    private const int MaximumBundleEntries = 4096;
+    private const int MaximumBundlePathBytes = 1024;
+    private const int MaximumDepsJsonBytes = 8 * 1024 * 1024;
+    private const int MaximumRuntimeConfigJsonBytes = 1024 * 1024;
     private static readonly byte[] PngSignature =
         { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
     private static readonly byte[] IhdrChunkType = Encoding.ASCII.GetBytes("IHDR");
     private static readonly byte[] IdatChunkType = Encoding.ASCII.GetBytes("IDAT");
     private static readonly byte[] IendChunkType = Encoding.ASCII.GetBytes("IEND");
+    private static readonly byte[] BundleSignature =
+    {
+        0x8b, 0x12, 0x02, 0xb9, 0x6a, 0x61, 0x20, 0x38,
+        0x72, 0x7b, 0x93, 0x02, 0x14, 0xd7, 0xa0, 0x32,
+        0x13, 0xf5, 0xb9, 0xe6, 0xef, 0xae, 0x33, 0x18,
+        0xee, 0x3b, 0x2d, 0xce, 0x24, 0xb3, 0x6a, 0xae
+    };
     private static readonly int[] ExpectedIconSizes = { 16, 24, 32, 48, 64, 128, 256 };
 
     public static void Verify(string executable)
@@ -29,17 +42,66 @@ public static class PortablePeVerifier
             throw new InvalidDataException("Executable path is empty");
         }
 
+        var file = new FileInfo(executable);
+        if (!file.Exists || file.Length <= 0 || file.Length > MaximumExecutableBytes)
+        {
+            throw new InvalidDataException("Executable size is outside the portable package bounds");
+        }
+
         VerifyImage(File.ReadAllBytes(executable));
     }
 
     public static void RunSelfTests()
     {
-        var valid = TestPeImage.Create();
+        var valid = TestPeImage.Create().WithBundle(includeRuntimeAssets: true);
         VerifyImage(valid.Bytes);
-        VerifyImage(TestPeImage.Create(splitIdat: true).Bytes);
+        VerifyImage(TestPeImage.Create(splitIdat: true).WithBundle(includeRuntimeAssets: true).Bytes);
+
+        ExpectRejected(
+            "framework-dependent single-file bundle has no embedded runtime",
+            TestPeImage.Create(includeRuntimeExport: false)
+                .WithBundle(includeRuntimeAssets: false).Bytes);
+
+        ExpectRejected(
+            "static self-contained runtime export is missing",
+            TestPeImage.Create(includeRuntimeExport: false)
+                .WithBundle(includeRuntimeAssets: true).Bytes);
+
+        ExpectRejected(
+            "export table claims an unbounded name count",
+            valid.Mutate(bytes =>
+                WriteUInt32(bytes, valid.ExportDirectoryFileOffset + 24, uint.MaxValue)));
+
+        ExpectRejected(
+            "DotNetRuntimeInfo is a forwarded export false positive",
+            valid.Mutate(bytes =>
+                WriteUInt32(
+                    bytes,
+                    valid.ExportFunctionTableFileOffset,
+                    valid.ExportDirectoryRva)));
+
+        ExpectRejected(
+            "bundle signature has a zero header offset",
+            valid.Mutate(bytes =>
+                WriteInt64(bytes, valid.BundleLocatorFileOffset, 0)));
+
+        ExpectRejected(
+            "bundle header offset exceeds file bounds",
+            valid.Mutate(bytes =>
+                WriteInt64(bytes, valid.BundleLocatorFileOffset, long.MaxValue)));
+
+        ExpectRejected(
+            "bundle manifest claims an unbounded entry count",
+            valid.Mutate(bytes =>
+                WriteUInt32(bytes, valid.BundleHeaderFileOffset + 8, uint.MaxValue)));
+
+        ExpectRejected(
+            "bundle marker false positive has no manifest",
+            TestPeImage.Create().WithFalsePositiveBundleMarker().Bytes);
+
         ExpectRejected(
             "RT_ICON PNG zlib stream has a duplicate Adler-32 trailer",
-            TestPeImage.Create(duplicateAdler: true).Bytes);
+            TestPeImage.Create(duplicateAdler: true).WithBundle(includeRuntimeAssets: true).Bytes);
 
         ExpectRejected("declared optional-header boundary", valid.Mutate(bytes =>
             WriteUInt16(bytes, valid.CoffHeaderOffset + 16, 70)));
@@ -152,6 +214,11 @@ public static class PortablePeVerifier
 
     private static void VerifyImage(byte[] bytes)
     {
+        if (bytes.Length == 0 || bytes.Length > MaximumExecutableBytes)
+        {
+            throw new InvalidDataException("Executable size is outside the portable package bounds");
+        }
+
         var reader = new ByteReader(bytes);
         reader.Require(0, 0x40, "DOS header");
         if (reader.ReadUInt16(0) != 0x5A4D)
@@ -235,6 +302,20 @@ public static class PortablePeVerifier
             112 + (2 * 8),
             8,
             "resource data directory");
+        var exportDirectoryEntry = GetOptionalFieldOffset(
+            optionalOffset,
+            optionalEnd,
+            112,
+            8,
+            "export data directory");
+        var exportRva = reader.ReadUInt32(exportDirectoryEntry);
+        var exportSize = reader.ReadUInt32(exportDirectoryEntry + 4);
+        if (exportRva == 0 || exportSize == 0)
+        {
+            throw new InvalidDataException(
+                "Self-contained static runtime export directory is missing");
+        }
+
         var resourceRva = reader.ReadUInt32(resourceDirectoryEntry);
         var resourceSize = reader.ReadUInt32(resourceDirectoryEntry + 4);
         if (resourceRva == 0 || resourceSize == 0)
@@ -246,20 +327,462 @@ public static class PortablePeVerifier
         var sectionTableBytes = checked(sectionCount * 40);
         reader.Require(sectionTableOffset, sectionTableBytes, "section table");
         var sections = new List<Section>(sectionCount);
+        var peImageEnd = checked(sectionTableOffset + sectionTableBytes);
         for (var index = 0; index < sectionCount; index++)
         {
             var offset = checked(sectionTableOffset + (index * 40));
-            sections.Add(new Section(
+            var section = new Section(
                 reader.ReadUInt32(offset + 8),
                 reader.ReadUInt32(offset + 12),
                 reader.ReadUInt32(offset + 16),
-                reader.ReadUInt32(offset + 20)));
+                reader.ReadUInt32(offset + 20));
+            sections.Add(section);
+            if (section.RawSize != 0)
+            {
+                if (section.RawPointer == 0 ||
+                    (ulong)section.RawPointer + section.RawSize > (ulong)bytes.Length)
+                {
+                    throw new InvalidDataException("PE section exceeds file raw-data bounds");
+                }
+
+                peImageEnd = Math.Max(
+                    peImageEnd,
+                    checked((int)((ulong)section.RawPointer + section.RawSize)));
+            }
         }
 
         var mapper = new RvaMapper(reader, sections);
+        VerifyStaticRuntimeExport(reader, mapper, exportRva, exportSize);
         mapper.Map(resourceRva, resourceSize, "resource directory");
         var resources = new ResourceReader(reader, mapper, resourceRva, resourceSize);
         VerifyIconResources(resources);
+        VerifySingleFileBundle(reader, sections, peImageEnd);
+    }
+
+    private static void VerifyStaticRuntimeExport(
+        ByteReader reader,
+        RvaMapper mapper,
+        uint exportRva,
+        uint exportSize)
+    {
+        const int exportDirectoryBytes = 40;
+        const uint maximumExportBytes = 4 * 1024 * 1024;
+        const uint maximumExports = 4096;
+        if (exportSize < exportDirectoryBytes || exportSize > maximumExportBytes ||
+            (ulong)exportRva + exportSize > uint.MaxValue)
+        {
+            throw new InvalidDataException("PE export directory size is invalid");
+        }
+
+        var directoryOffset = mapper.Map(
+            exportRva,
+            exportDirectoryBytes,
+            "export directory");
+        var functionCount = reader.ReadUInt32(directoryOffset + 20);
+        var nameCount = reader.ReadUInt32(directoryOffset + 24);
+        var functionsRva = reader.ReadUInt32(directoryOffset + 28);
+        var namesRva = reader.ReadUInt32(directoryOffset + 32);
+        var ordinalsRva = reader.ReadUInt32(directoryOffset + 36);
+        if (functionCount == 0 || functionCount > maximumExports ||
+            nameCount == 0 || nameCount > functionCount || nameCount > maximumExports)
+        {
+            throw new InvalidDataException("PE export counts are invalid");
+        }
+
+        var functionTableBytes = checked(functionCount * 4);
+        var nameTableBytes = checked(nameCount * 4);
+        var ordinalTableBytes = checked(nameCount * 2);
+        RequireExportRange(exportRva, exportSize, functionsRva, functionTableBytes, "functions");
+        RequireExportRange(exportRva, exportSize, namesRva, nameTableBytes, "names");
+        RequireExportRange(exportRva, exportSize, ordinalsRva, ordinalTableBytes, "ordinals");
+        var functionsOffset = mapper.Map(functionsRva, functionTableBytes, "export functions");
+        var namesOffset = mapper.Map(namesRva, nameTableBytes, "export names");
+        var ordinalsOffset = mapper.Map(ordinalsRva, ordinalTableBytes, "export ordinals");
+
+        var foundRuntimeInfo = false;
+        for (var index = 0u; index < nameCount; index++)
+        {
+            var nameRva = reader.ReadUInt32(checked(namesOffset + (int)(index * 4)));
+            var name = ReadExportName(reader, mapper, exportRva, exportSize, nameRva);
+            var ordinal = reader.ReadUInt16(checked(ordinalsOffset + (int)(index * 2)));
+            if (ordinal >= functionCount)
+            {
+                throw new InvalidDataException("PE export ordinal exceeds function table");
+            }
+
+            if (!string.Equals(name, "DotNetRuntimeInfo", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (foundRuntimeInfo)
+            {
+                throw new InvalidDataException("DotNetRuntimeInfo export is duplicated");
+            }
+
+            var functionRva = reader.ReadUInt32(
+                checked(functionsOffset + (ordinal * 4)));
+            var exportEnd = (ulong)exportRva + exportSize;
+            if (functionRva == 0 ||
+                ((ulong)functionRva >= exportRva && (ulong)functionRva < exportEnd))
+            {
+                throw new InvalidDataException(
+                    "DotNetRuntimeInfo must be a concrete static runtime data export");
+            }
+
+            mapper.Map(functionRva, 1, "DotNetRuntimeInfo export target");
+            foundRuntimeInfo = true;
+        }
+
+        if (!foundRuntimeInfo)
+        {
+            throw new InvalidDataException(
+                "DotNetRuntimeInfo static self-contained runtime export is missing");
+        }
+    }
+
+    private static void RequireExportRange(
+        uint exportRva,
+        uint exportSize,
+        uint valueRva,
+        uint valueSize,
+        string field)
+    {
+        var exportEnd = (ulong)exportRva + exportSize;
+        if (valueSize == 0 || valueRva < exportRva ||
+            (ulong)valueRva + valueSize > exportEnd)
+        {
+            throw new InvalidDataException($"PE export {field} table exceeds export bounds");
+        }
+    }
+
+    private static string ReadExportName(
+        ByteReader reader,
+        RvaMapper mapper,
+        uint exportRva,
+        uint exportSize,
+        uint nameRva)
+    {
+        const int maximumNameBytes = 256;
+        var exportEnd = (ulong)exportRva + exportSize;
+        if (nameRva < exportRva || nameRva >= exportEnd)
+        {
+            throw new InvalidDataException("PE export name RVA exceeds export bounds");
+        }
+
+        var bytes = new byte[maximumNameBytes];
+        for (var index = 0; index < bytes.Length; index++)
+        {
+            var currentRva = (ulong)nameRva + (uint)index;
+            if (currentRva >= exportEnd)
+            {
+                throw new InvalidDataException("PE export name is unterminated");
+            }
+
+            var value = reader.ReadByte(mapper.Map((uint)currentRva, 1, "export name"));
+            if (value == 0)
+            {
+                if (index == 0)
+                {
+                    throw new InvalidDataException("PE export name is empty");
+                }
+
+                return Encoding.ASCII.GetString(bytes, 0, index);
+            }
+
+            if (value < 0x21 || value > 0x7E)
+            {
+                throw new InvalidDataException("PE export name is not printable ASCII");
+            }
+
+            bytes[index] = value;
+        }
+
+        throw new InvalidDataException("PE export name exceeds bounds");
+    }
+
+    private static void VerifySingleFileBundle(
+        ByteReader reader,
+        IReadOnlyList<Section> sections,
+        int peImageEnd)
+    {
+        if (peImageEnd < 40 || peImageEnd > reader.Bytes.Length)
+        {
+            throw new InvalidDataException("PE image boundary is invalid");
+        }
+
+        var search = reader.Bytes.AsSpan(8, peImageEnd - 8);
+        var relativeSignatureOffset = search.IndexOf(BundleSignature);
+        if (relativeSignatureOffset < 0)
+        {
+            throw new InvalidDataException(".NET single-file bundle marker is missing");
+        }
+
+        var signatureOffset = checked(8 + relativeSignatureOffset);
+        var remaining = search[(relativeSignatureOffset + 1)..];
+        if (remaining.IndexOf(BundleSignature) >= 0)
+        {
+            throw new InvalidDataException(".NET single-file bundle marker is ambiguous");
+        }
+
+        var locatorOffset = checked(signatureOffset - 8);
+        var markerIsMapped = sections.Any(section =>
+            section.RawSize != 0 &&
+            (ulong)locatorOffset >= section.RawPointer &&
+            (ulong)locatorOffset + 40 <= (ulong)section.RawPointer + section.RawSize);
+        if (!markerIsMapped)
+        {
+            throw new InvalidDataException(".NET single-file bundle marker is not PE-mapped data");
+        }
+
+        var headerOffset64 = reader.ReadInt64(locatorOffset);
+        if (headerOffset64 <= peImageEnd || headerOffset64 > reader.Bytes.Length - 12)
+        {
+            throw new InvalidDataException(".NET single-file bundle header offset is invalid");
+        }
+
+        var headerOffset = checked((int)headerOffset64);
+        var bundle = new BundleReader(reader, headerOffset);
+        var majorVersion = bundle.ReadUInt32("bundle major version");
+        var minorVersion = bundle.ReadUInt32("bundle minor version");
+        if (majorVersion != 6 || minorVersion != 0)
+        {
+            throw new InvalidDataException(".NET 10 bundle manifest must use format 6.0");
+        }
+
+        var fileCount = bundle.ReadInt32("bundle entry count");
+        if (fileCount <= 0 || fileCount > MaximumBundleEntries)
+        {
+            throw new InvalidDataException("Bundle entry count is outside bounds");
+        }
+
+        var bundleId = bundle.ReadString("bundle ID", 12);
+        if (bundleId.Length != 12 || bundleId.Any(value =>
+                !((value >= 'A' && value <= 'Z') ||
+                  (value >= 'a' && value <= 'z') ||
+                  (value >= '0' && value <= '9') ||
+                  value == '-' || value == '_')))
+        {
+            throw new InvalidDataException("Bundle ID is invalid");
+        }
+
+        var depsOffset = bundle.ReadInt64("deps.json offset");
+        var depsSize = bundle.ReadInt64("deps.json size");
+        var runtimeConfigOffset = bundle.ReadInt64("runtimeconfig.json offset");
+        var runtimeConfigSize = bundle.ReadInt64("runtimeconfig.json size");
+        var flags = bundle.ReadUInt64("bundle flags");
+        if (flags != 0)
+        {
+            throw new InvalidDataException("Bundle flags do not match the portable package contract");
+        }
+
+        var entries = new List<BundleEntry>(fileCount);
+        var ordinalPaths = new HashSet<string>(StringComparer.Ordinal);
+        var foldedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < fileCount; index++)
+        {
+            var offset = bundle.ReadInt64("bundle entry offset");
+            var size = bundle.ReadInt64("bundle entry size");
+            var compressedSize = bundle.ReadInt64("bundle entry compressed size");
+            var type = bundle.ReadByte("bundle entry type");
+            var relativePath = bundle.ReadString("bundle entry path", MaximumBundlePathBytes);
+
+            if (offset < peImageEnd || size <= 0 || compressedSize < 0 ||
+                compressedSize >= size || type > 5)
+            {
+                throw new InvalidDataException("Bundle entry metadata is invalid");
+            }
+
+            ValidateBundlePath(relativePath);
+            if (!ordinalPaths.Add(relativePath) || !foldedPaths.Add(relativePath))
+            {
+                throw new InvalidDataException("Bundle entry path is duplicated or case-colliding");
+            }
+
+            var storedSize = compressedSize == 0 ? size : compressedSize;
+            if (offset > headerOffset64 || storedSize > headerOffset64 - offset)
+            {
+                throw new InvalidDataException("Bundle entry data exceeds the manifest boundary");
+            }
+
+            entries.Add(new BundleEntry(offset, size, compressedSize, type, relativePath));
+        }
+
+        if (bundle.Position != reader.Bytes.Length)
+        {
+            throw new InvalidDataException("Bundle manifest does not end at end of file");
+        }
+
+        var orderedEntries = entries.OrderBy(entry => entry.Offset).ToArray();
+        long previousEnd = peImageEnd;
+        foreach (var entry in orderedEntries)
+        {
+            if (entry.Offset < previousEnd)
+            {
+                throw new InvalidDataException("Bundle entry data overlaps another entry");
+            }
+
+            previousEnd = checked(entry.Offset + entry.StoredSize);
+        }
+
+        var deps = GetUniqueBundleEntry(entries, 3, "deps.json");
+        var runtimeConfig = GetUniqueBundleEntry(entries, 4, "runtimeconfig.json");
+        if (deps.Offset != depsOffset || deps.Size != depsSize || deps.CompressedSize != 0 ||
+            runtimeConfig.Offset != runtimeConfigOffset ||
+            runtimeConfig.Size != runtimeConfigSize ||
+            runtimeConfig.CompressedSize != 0)
+        {
+            throw new InvalidDataException("Bundle configuration locations disagree with manifest entries");
+        }
+
+        RequireRuntimeAsset(entries, "System.Private.CoreLib.dll", 1);
+        VerifyDepsJson(reader, deps);
+        VerifyRuntimeConfigJson(reader, runtimeConfig);
+    }
+
+    private static void ValidateBundlePath(string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath) ||
+            relativePath[0] == '/' ||
+            relativePath.Contains('\\') ||
+            relativePath.Contains(':') ||
+            relativePath.Any(char.IsControl))
+        {
+            throw new InvalidDataException("Bundle entry path is unsafe");
+        }
+
+        var segments = relativePath.Split('/');
+        if (segments.Any(segment =>
+                segment.Length == 0 || segment == "." || segment == ".."))
+        {
+            throw new InvalidDataException("Bundle entry path contains an unsafe segment");
+        }
+    }
+
+    private static BundleEntry GetUniqueBundleEntry(
+        IReadOnlyList<BundleEntry> entries,
+        byte type,
+        string field)
+    {
+        var matches = entries.Where(entry => entry.Type == type).ToArray();
+        if (matches.Length != 1)
+        {
+            throw new InvalidDataException($"Bundle must contain one {field} entry");
+        }
+
+        return matches[0];
+    }
+
+    private static void RequireRuntimeAsset(
+        IReadOnlyList<BundleEntry> entries,
+        string path,
+        byte type)
+    {
+        if (entries.Count(entry =>
+                entry.Type == type &&
+                string.Equals(entry.RelativePath, path, StringComparison.Ordinal)) != 1)
+        {
+            throw new InvalidDataException($"Self-contained runtime asset is missing: {path}");
+        }
+    }
+
+    private static void VerifyDepsJson(ByteReader reader, BundleEntry entry)
+    {
+        using var document = ParseBundleJson(reader, entry, MaximumDepsJsonBytes, "deps.json");
+        if (!document.RootElement.TryGetProperty("runtimeTarget", out var runtimeTarget) ||
+            runtimeTarget.ValueKind != JsonValueKind.Object ||
+            !runtimeTarget.TryGetProperty("name", out var name) ||
+            name.ValueKind != JsonValueKind.String ||
+            name.GetString() is not string targetName ||
+            !targetName.EndsWith("/win-x64", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("deps.json runtime target must be win-x64");
+        }
+    }
+
+    private static void VerifyRuntimeConfigJson(ByteReader reader, BundleEntry entry)
+    {
+        using var document = ParseBundleJson(
+            reader,
+            entry,
+            MaximumRuntimeConfigJsonBytes,
+            "runtimeconfig.json");
+        if (!document.RootElement.TryGetProperty("runtimeOptions", out var options) ||
+            options.ValueKind != JsonValueKind.Object ||
+            !options.TryGetProperty("tfm", out var tfm) ||
+            tfm.ValueKind != JsonValueKind.String ||
+            !string.Equals(tfm.GetString(), "net10.0", StringComparison.Ordinal) ||
+            options.TryGetProperty("framework", out _) ||
+            options.TryGetProperty("frameworks", out _) ||
+            !options.TryGetProperty("includedFrameworks", out var frameworks) ||
+            frameworks.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException(
+                "runtimeconfig.json must describe a self-contained net10.0 app");
+        }
+
+        var hasCore = false;
+        var hasDesktop = false;
+        foreach (var framework in frameworks.EnumerateArray())
+        {
+            if (framework.ValueKind != JsonValueKind.Object ||
+                !framework.TryGetProperty("name", out var name) ||
+                name.ValueKind != JsonValueKind.String ||
+                !framework.TryGetProperty("version", out var version) ||
+                version.ValueKind != JsonValueKind.String ||
+                !Version.TryParse(version.GetString(), out var parsedVersion) ||
+                parsedVersion.Major != 10)
+            {
+                throw new InvalidDataException("runtimeconfig.json included framework is invalid");
+            }
+
+            hasCore |= string.Equals(
+                name.GetString(),
+                "Microsoft.NETCore.App",
+                StringComparison.Ordinal);
+            hasDesktop |= string.Equals(
+                name.GetString(),
+                "Microsoft.WindowsDesktop.App",
+                StringComparison.Ordinal);
+        }
+
+        if (!hasCore || !hasDesktop)
+        {
+            throw new InvalidDataException(
+                "runtimeconfig.json omits required .NET 10 desktop frameworks");
+        }
+    }
+
+    private static JsonDocument ParseBundleJson(
+        ByteReader reader,
+        BundleEntry entry,
+        int maximumBytes,
+        string field)
+    {
+        if (entry.CompressedSize != 0 || entry.Size > maximumBytes)
+        {
+            throw new InvalidDataException($"Bundle {field} is compressed or exceeds bounds");
+        }
+
+        reader.Require(checked((int)entry.Offset), checked((int)entry.Size), field);
+        try
+        {
+            return JsonDocument.Parse(
+                new ReadOnlyMemory<byte>(
+                    reader.Bytes,
+                    checked((int)entry.Offset),
+                    checked((int)entry.Size)),
+                new JsonDocumentOptions
+                {
+                    AllowTrailingCommas = false,
+                    CommentHandling = JsonCommentHandling.Disallow,
+                    MaxDepth = 64
+                });
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException($"Bundle {field} is invalid JSON", exception);
+        }
     }
 
     private static void VerifyIconResources(ResourceReader resources)
@@ -639,8 +1162,123 @@ public static class PortablePeVerifier
     private static void WriteUInt32(byte[] bytes, int offset, uint value) =>
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offset, 4), value);
 
+    private static void WriteInt64(byte[] bytes, int offset, long value) =>
+        BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(offset, 8), value);
+
     private static void WriteBigEndianUInt32(byte[] bytes, int offset, uint value) =>
         BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(offset, 4), value);
+
+    private sealed record BundleEntry(
+        long Offset,
+        long Size,
+        long CompressedSize,
+        byte Type,
+        string RelativePath)
+    {
+        public long StoredSize => CompressedSize == 0 ? Size : CompressedSize;
+    }
+
+    private sealed class BundleReader
+    {
+        private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+        private readonly ByteReader _reader;
+
+        public BundleReader(ByteReader reader, int offset)
+        {
+            _reader = reader;
+            Position = offset;
+        }
+
+        public int Position { get; private set; }
+
+        public byte ReadByte(string field)
+        {
+            _reader.Require(Position, 1, field);
+            return _reader.Bytes[Position++];
+        }
+
+        public int ReadInt32(string field)
+        {
+            _reader.Require(Position, 4, field);
+            var value = BinaryPrimitives.ReadInt32LittleEndian(
+                _reader.Bytes.AsSpan(Position, 4));
+            Position = checked(Position + 4);
+            return value;
+        }
+
+        public uint ReadUInt32(string field)
+        {
+            _reader.Require(Position, 4, field);
+            var value = BinaryPrimitives.ReadUInt32LittleEndian(
+                _reader.Bytes.AsSpan(Position, 4));
+            Position = checked(Position + 4);
+            return value;
+        }
+
+        public long ReadInt64(string field)
+        {
+            _reader.Require(Position, 8, field);
+            var value = BinaryPrimitives.ReadInt64LittleEndian(
+                _reader.Bytes.AsSpan(Position, 8));
+            Position = checked(Position + 8);
+            return value;
+        }
+
+        public ulong ReadUInt64(string field)
+        {
+            _reader.Require(Position, 8, field);
+            var value = BinaryPrimitives.ReadUInt64LittleEndian(
+                _reader.Bytes.AsSpan(Position, 8));
+            Position = checked(Position + 8);
+            return value;
+        }
+
+        public string ReadString(string field, int maximumBytes)
+        {
+            if (maximumBytes <= 0 || maximumBytes > 16383)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+            }
+
+            var first = ReadByte($"{field} length");
+            int byteLength;
+            if ((first & 0x80) == 0)
+            {
+                byteLength = first;
+            }
+            else
+            {
+                var second = ReadByte($"{field} length");
+                if ((second & 0x80) != 0)
+                {
+                    throw new InvalidDataException($"{field} length prefix exceeds bounds");
+                }
+
+                byteLength = (first & 0x7F) | (second << 7);
+                if (byteLength < 128)
+                {
+                    throw new InvalidDataException($"{field} length prefix is not canonical");
+                }
+            }
+
+            if (byteLength <= 0 || byteLength > maximumBytes)
+            {
+                throw new InvalidDataException($"{field} length exceeds bounds");
+            }
+
+            _reader.Require(Position, byteLength, field);
+            try
+            {
+                var value = StrictUtf8.GetString(_reader.Bytes, Position, byteLength);
+                Position = checked(Position + byteLength);
+                return value;
+            }
+            catch (DecoderFallbackException exception)
+            {
+                throw new InvalidDataException($"{field} is not valid UTF-8", exception);
+            }
+        }
+    }
 
     private sealed class ByteReader
     {
@@ -662,10 +1300,22 @@ public static class PortablePeVerifier
             return BinaryPrimitives.ReadUInt16LittleEndian(Bytes.AsSpan(offset, 2));
         }
 
+        public byte ReadByte(int offset)
+        {
+            Require(offset, 1, "Byte");
+            return Bytes[offset];
+        }
+
         public int ReadInt32(int offset)
         {
             Require(offset, 4, "Int32");
             return BinaryPrimitives.ReadInt32LittleEndian(Bytes.AsSpan(offset, 4));
+        }
+
+        public long ReadInt64(int offset)
+        {
+            Require(offset, 8, "Int64");
+            return BinaryPrimitives.ReadInt64LittleEndian(Bytes.AsSpan(offset, 8));
         }
 
         public uint ReadUInt32(int offset)
@@ -947,6 +1597,13 @@ public static class PortablePeVerifier
         private const int OptionalHeaderSize = 0xF0;
         private const int ResourceRawOffset = 0x200;
         private const uint ResourceRva = 0x1000;
+        private static readonly byte[] BundleSignature =
+        {
+            0x8b, 0x12, 0x02, 0xb9, 0x6a, 0x61, 0x20, 0x38,
+            0x72, 0x7b, 0x93, 0x02, 0x14, 0xd7, 0xa0, 0x32,
+            0x13, 0xf5, 0xb9, 0xe6, 0xef, 0xae, 0x33, 0x18,
+            0xee, 0x3b, 0x2d, 0xce, 0x24, 0xb3, 0x6a, 0xae
+        };
 
         private TestPeImage(
             byte[] bytes,
@@ -956,7 +1613,12 @@ public static class PortablePeVerifier
             int firstPngLength,
             int firstPngIdatDataFileOffset,
             int firstPngIdatDataLength,
-            int firstIconDataEntryFileOffset)
+            int firstIconDataEntryFileOffset,
+            int bundleLocatorFileOffset = -1,
+            int bundleHeaderFileOffset = -1,
+            int exportDirectoryFileOffset = -1,
+            int exportFunctionTableFileOffset = -1,
+            uint exportDirectoryRva = 0)
         {
             Bytes = bytes;
             GroupDataFileOffset = groupDataFileOffset;
@@ -966,6 +1628,11 @@ public static class PortablePeVerifier
             FirstPngIdatDataFileOffset = firstPngIdatDataFileOffset;
             FirstPngIdatDataLength = firstPngIdatDataLength;
             FirstIconDataEntryFileOffset = firstIconDataEntryFileOffset;
+            BundleLocatorFileOffset = bundleLocatorFileOffset;
+            BundleHeaderFileOffset = bundleHeaderFileOffset;
+            ExportDirectoryFileOffset = exportDirectoryFileOffset;
+            ExportFunctionTableFileOffset = exportFunctionTableFileOffset;
+            ExportDirectoryRva = exportDirectoryRva;
         }
 
         public byte[] Bytes { get; }
@@ -979,6 +1646,11 @@ public static class PortablePeVerifier
         public int FirstPngIdatDataFileOffset { get; }
         public int FirstPngIdatDataLength { get; }
         public int FirstIconDataEntryFileOffset { get; }
+        public int BundleLocatorFileOffset { get; }
+        public int BundleHeaderFileOffset { get; }
+        public int ExportDirectoryFileOffset { get; }
+        public int ExportFunctionTableFileOffset { get; }
+        public uint ExportDirectoryRva { get; }
 
         public byte[] Mutate(Action<byte[]> mutation)
         {
@@ -987,16 +1659,125 @@ public static class PortablePeVerifier
             return copy;
         }
 
+        public TestPeImage WithBundle(bool includeRuntimeAssets)
+        {
+            var bundleEntries = new List<BundleTestEntry>
+            {
+                new("Ke.Windows.dll", 1, Encoding.UTF8.GetBytes("managed app")),
+                new(
+                    "Ke.Windows.deps.json",
+                    3,
+                    Encoding.UTF8.GetBytes(
+                        "{\"runtimeTarget\":{\"name\":\".NETCoreApp,Version=v10.0/win-x64\"}}")),
+                new(
+                    "Ke.Windows.runtimeconfig.json",
+                    4,
+                    Encoding.UTF8.GetBytes(includeRuntimeAssets
+                        ? "{\"runtimeOptions\":{\"tfm\":\"net10.0\",\"includedFrameworks\":[{\"name\":\"Microsoft.NETCore.App\",\"version\":\"10.0.0\"},{\"name\":\"Microsoft.WindowsDesktop.App\",\"version\":\"10.0.0\"}]}}"
+                        : "{\"runtimeOptions\":{\"tfm\":\"net10.0\",\"frameworks\":[{\"name\":\"Microsoft.NETCore.App\",\"version\":\"10.0.0\"}]}}"))
+            };
+            if (includeRuntimeAssets)
+            {
+                bundleEntries.Add(new BundleTestEntry(
+                    "System.Private.CoreLib.dll",
+                    1,
+                    Encoding.UTF8.GetBytes("runtime assembly")));
+                bundleEntries.Add(new BundleTestEntry(
+                    "coreclr.dll",
+                    2,
+                    Encoding.UTF8.GetBytes("runtime native binary")));
+                bundleEntries.Add(new BundleTestEntry(
+                    "clrjit.dll",
+                    2,
+                    Encoding.UTF8.GetBytes("runtime JIT")));
+            }
+
+            var image = new List<byte>(Bytes);
+            foreach (var entry in bundleEntries)
+            {
+                entry.Offset = image.Count;
+                image.AddRange(entry.Data);
+            }
+
+            var headerOffset = image.Count;
+            using (var header = new MemoryStream())
+            using (var writer = new BinaryWriter(header, Encoding.UTF8, leaveOpen: true))
+            {
+                writer.Write(6u);
+                writer.Write(0u);
+                writer.Write(bundleEntries.Count);
+                writer.Write("FixtureId123");
+
+                var deps = bundleEntries.Single(entry => entry.Type == 3);
+                var runtimeConfig = bundleEntries.Single(entry => entry.Type == 4);
+                writer.Write((long)deps.Offset);
+                writer.Write((long)deps.Data.Length);
+                writer.Write((long)runtimeConfig.Offset);
+                writer.Write((long)runtimeConfig.Data.Length);
+                writer.Write(0UL);
+
+                foreach (var entry in bundleEntries)
+                {
+                    writer.Write((long)entry.Offset);
+                    writer.Write((long)entry.Data.Length);
+                    writer.Write(0L);
+                    writer.Write(entry.Type);
+                    writer.Write(entry.Path);
+                }
+
+                writer.Flush();
+                image.AddRange(header.ToArray());
+            }
+
+            var result = image.ToArray();
+            var locatorOffset = Bytes.Length - 64;
+            WriteInt64(result, locatorOffset, headerOffset);
+            BundleSignature.CopyTo(result, locatorOffset + 8);
+            return CopyWithBundle(result, locatorOffset, headerOffset);
+        }
+
+        public TestPeImage WithFalsePositiveBundleMarker()
+        {
+            var result = (byte[])Bytes.Clone();
+            var locatorOffset = result.Length - 64;
+            BundleSignature.CopyTo(result, locatorOffset + 8);
+            return CopyWithBundle(result, locatorOffset, -1);
+        }
+
+        private TestPeImage CopyWithBundle(
+            byte[] bytes,
+            int locatorOffset,
+            int headerOffset) =>
+            new(
+                bytes,
+                GroupDataFileOffset,
+                FirstPngFileOffset,
+                FirstPngIendFileOffset,
+                FirstPngLength,
+                FirstPngIdatDataFileOffset,
+                FirstPngIdatDataLength,
+                FirstIconDataEntryFileOffset,
+                locatorOffset,
+                headerOffset,
+                ExportDirectoryFileOffset,
+                ExportFunctionTableFileOffset,
+                ExportDirectoryRva);
+
         public static TestPeImage Create(
             bool splitIdat = false,
-            bool duplicateAdler = false)
+            bool duplicateAdler = false,
+            bool includeRuntimeExport = true)
         {
             var resource = new ResourceFixtureBuilder(
                 ResourceRva,
                 splitIdat,
                 duplicateAdler);
             var fixture = resource.Build();
-            var rawSize = Align(fixture.Bytes.Length, 0x200);
+            var exportRelativeOffset = Align(fixture.Bytes.Length, 4);
+            var exportContentLength = includeRuntimeExport
+                ? GetExportContentLength(exportRelativeOffset)
+                : fixture.Bytes.Length;
+            var rawSize = Align(checked(exportContentLength + 128), 0x200);
             var bytes = new byte[checked(ResourceRawOffset + rawSize)];
 
             WriteUInt16(bytes, 0, 0x5A4D);
@@ -1012,6 +1793,15 @@ public static class PortablePeVerifier
             WriteUInt16(bytes, optional, Pe32PlusMagic);
             WriteUInt16(bytes, optional + 68, WindowsGuiSubsystem);
             WriteUInt32(bytes, optional + 108, 16);
+            if (includeRuntimeExport)
+            {
+                var exportRva = checked(ResourceRva + (uint)exportRelativeOffset);
+                WriteUInt32(bytes, optional + 112, exportRva);
+                WriteUInt32(
+                    bytes,
+                    optional + 112 + 4,
+                    checked((uint)(exportContentLength - exportRelativeOffset - 1)));
+            }
             WriteUInt32(bytes, optional + 112 + (2 * 8), ResourceRva);
             WriteUInt32(bytes, optional + 112 + (2 * 8) + 4, (uint)fixture.Bytes.Length);
 
@@ -1023,6 +1813,10 @@ public static class PortablePeVerifier
             WriteUInt32(bytes, section + 20, ResourceRawOffset);
 
             fixture.Bytes.CopyTo(bytes, ResourceRawOffset);
+            if (includeRuntimeExport)
+            {
+                WriteRuntimeExport(bytes, exportRelativeOffset);
+            }
             return new TestPeImage(
                 bytes,
                 ResourceRawOffset + fixture.GroupDataOffset,
@@ -1031,11 +1825,92 @@ public static class PortablePeVerifier
                 fixture.FirstPngLength,
                 ResourceRawOffset + fixture.FirstPngIdatDataOffset,
                 fixture.FirstPngIdatDataLength,
-                ResourceRawOffset + fixture.FirstIconDataEntryOffset);
+                ResourceRawOffset + fixture.FirstIconDataEntryOffset,
+                exportDirectoryFileOffset: includeRuntimeExport
+                    ? ResourceRawOffset + exportRelativeOffset
+                    : -1,
+                exportFunctionTableFileOffset: includeRuntimeExport
+                    ? ResourceRawOffset + exportRelativeOffset + 40
+                    : -1,
+                exportDirectoryRva: includeRuntimeExport
+                    ? checked(ResourceRva + (uint)exportRelativeOffset)
+                    : 0);
         }
 
         private static int Align(int value, int alignment) =>
             checked(((value + alignment - 1) / alignment) * alignment);
+
+        private static int GetExportContentLength(int exportRelativeOffset)
+        {
+            var dllNameLength = Encoding.ASCII.GetByteCount("Ke.Windows.exe") + 1;
+            var exportNameLength = Encoding.ASCII.GetByteCount("DotNetRuntimeInfo") + 1;
+            var dataRelativeOffset = Align(
+                checked(exportRelativeOffset + 50 + dllNameLength + exportNameLength),
+                4);
+            return checked(dataRelativeOffset + 1);
+        }
+
+        private static void WriteRuntimeExport(byte[] bytes, int exportRelativeOffset)
+        {
+            var exportFileOffset = checked(ResourceRawOffset + exportRelativeOffset);
+            var functionsRelativeOffset = checked(exportRelativeOffset + 40);
+            var namesRelativeOffset = checked(exportRelativeOffset + 44);
+            var ordinalsRelativeOffset = checked(exportRelativeOffset + 48);
+            var dllNameRelativeOffset = checked(exportRelativeOffset + 50);
+            var dllName = Encoding.ASCII.GetBytes("Ke.Windows.exe\0");
+            var exportNameRelativeOffset = checked(dllNameRelativeOffset + dllName.Length);
+            var exportName = Encoding.ASCII.GetBytes("DotNetRuntimeInfo\0");
+            var dataRelativeOffset = Align(
+                checked(exportNameRelativeOffset + exportName.Length),
+                4);
+
+            WriteUInt32(
+                bytes,
+                exportFileOffset + 12,
+                checked(ResourceRva + (uint)dllNameRelativeOffset));
+            WriteUInt32(bytes, exportFileOffset + 16, 1);
+            WriteUInt32(bytes, exportFileOffset + 20, 1);
+            WriteUInt32(bytes, exportFileOffset + 24, 1);
+            WriteUInt32(
+                bytes,
+                exportFileOffset + 28,
+                checked(ResourceRva + (uint)functionsRelativeOffset));
+            WriteUInt32(
+                bytes,
+                exportFileOffset + 32,
+                checked(ResourceRva + (uint)namesRelativeOffset));
+            WriteUInt32(
+                bytes,
+                exportFileOffset + 36,
+                checked(ResourceRva + (uint)ordinalsRelativeOffset));
+            WriteUInt32(
+                bytes,
+                ResourceRawOffset + functionsRelativeOffset,
+                checked(ResourceRva + (uint)dataRelativeOffset));
+            WriteUInt32(
+                bytes,
+                ResourceRawOffset + namesRelativeOffset,
+                checked(ResourceRva + (uint)exportNameRelativeOffset));
+            WriteUInt16(bytes, ResourceRawOffset + ordinalsRelativeOffset, 0);
+            dllName.CopyTo(bytes, ResourceRawOffset + dllNameRelativeOffset);
+            exportName.CopyTo(bytes, ResourceRawOffset + exportNameRelativeOffset);
+            bytes[ResourceRawOffset + dataRelativeOffset] = 1;
+        }
+
+        private sealed class BundleTestEntry
+        {
+            public BundleTestEntry(string path, byte type, byte[] data)
+            {
+                Path = path;
+                Type = type;
+                Data = data;
+            }
+
+            public string Path { get; }
+            public byte Type { get; }
+            public byte[] Data { get; }
+            public int Offset { get; set; }
+        }
     }
 
     private sealed class ResourceFixtureBuilder
