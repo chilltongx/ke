@@ -35,6 +35,9 @@
 | 18 | 旧版登录项在 build 4 首次启动后被注销 | PASS (automatic) |
 | 19 | 同一签名身份升级后 Accessibility 授权保持有效 | PENDING (manual) |
 | 20 | 卸载只删除本应用、旧 plugin 和自有支持目录 | PASS (automatic) |
+| 21 | 从其他应用切回 Codex，不点击 composer，单击“可”后发送一次 | PENDING (manual) |
+| 22 | Codex 首个可编辑元素为明确搜索框时闪红且不输入 | PENDING (manual) |
+| 23 | VS Code 和微信没有输入焦点时不启用 Codex 自动扫描 | PENDING (manual) |
 
 微信只能使用测试联系人或“文件传输助手”，VS Code 和 Codex 只能使用专门测试会话。
 不得向真实联系人、工作群或生产任务执行发送验收。自动化 probe 只能写入“探针”再清空，
