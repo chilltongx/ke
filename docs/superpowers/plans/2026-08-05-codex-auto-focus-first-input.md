@@ -16,8 +16,29 @@
 - Select the first enabled, value-settable `AXTextArea` or `AXTextField`; do not require uniqueness.
 - Preserve the existing Codex classifier after selection.
 - Preserve existing draft, PID, window, element, write-confirmation, and single-Enter checks.
+- An auto-focused snapshot may refresh one replacement Accessibility element only when PID,
+  Bundle ID, focused window, and complete `FocusedChatContext` remain identical; consume the
+  allowance after that refresh or after a successful write. Normally focused targets remain strict.
 - Do not cache an old element, switch applications, use screen coordinates, or retry a send.
 - Stop after inspecting 2,048 elements and fail closed.
+
+## Follow-up Regression Fix: Electron Recreates the Composer on Focus
+
+Observed failure: setting `AXFocused` succeeded and the caret appeared, but Codex/Electron then
+recreated the composer Accessibility object. The first sender revalidation rejected the new object
+as `accessibility.targetChanged`, before writing “可”.
+
+Regression coverage requires:
+
+- the first context-equivalent replacement of an auto-focused target is accepted and becomes the
+  active snapshot element;
+- a second replacement is rejected;
+- a replacement with changed context is rejected;
+- a replacement after a successful write is rejected;
+- a normally focused target never accepts an identity replacement.
+
+Implementation is limited to `FocusedTargetSnapshot` and `AccessibilityClient.revalidate(_:)`.
+There is no delay, retry, application switch, or relaxation of PID/window/context checks.
 
 ---
 

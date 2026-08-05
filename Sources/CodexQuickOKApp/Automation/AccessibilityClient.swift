@@ -140,18 +140,18 @@ final class AccessibilityClient: FocusedInputControlling {
         }
 
         let window = try system.focusedWindow(processIdentifier: pid)
-        let element = try captureElement(
+        let captured = try captureElement(
             processIdentifier: pid,
             bundleIdentifier: bundleIdentifier,
             window: window
         )
         guard try system.processIdentifier(of: window) == pid,
-              try system.processIdentifier(of: element) == pid
+              try system.processIdentifier(of: captured.element) == pid
         else {
             throw AXError.focusedElementUnavailable
         }
         let context = try makeContext(
-            focused: element,
+            focused: captured.element,
             window: window,
             expectedPID: pid
         )
@@ -159,8 +159,9 @@ final class AccessibilityClient: FocusedInputControlling {
             processIdentifier: pid,
             bundleIdentifier: bundleIdentifier,
             window: window,
-            element: element,
-            context: context
+            element: captured.element,
+            context: context,
+            allowsEquivalentFocusReplacement: captured.wasAutoFocused
         )
     }
 
@@ -179,11 +180,35 @@ final class AccessibilityClient: FocusedInputControlling {
         )
         guard try system.processIdentifier(of: window) == target.processIdentifier,
               try system.processIdentifier(of: element) == target.processIdentifier,
-              system.elementsAreEqual(window, target.window),
-              system.elementsAreEqual(element, target.element)
+              system.elementsAreEqual(window, target.window)
         else {
             throw AXError.targetChanged
         }
+        guard !system.elementsAreEqual(element, target.element) else { return }
+        guard target.allowsEquivalentFocusReplacement else {
+            throw AXError.targetChanged
+        }
+
+        let latestContext: FocusedChatContext
+        do {
+            guard try isEditableInput(
+                element,
+                expectedProcessIdentifier: target.processIdentifier
+            ) else {
+                throw AXError.targetChanged
+            }
+            latestContext = try makeContext(
+                focused: element,
+                window: window,
+                expectedPID: target.processIdentifier
+            )
+        } catch {
+            throw AXError.targetChanged
+        }
+        guard latestContext == target.context else {
+            throw AXError.targetChanged
+        }
+        target.replaceAutoFocusedElement(element)
     }
 
     func composerValue(in target: FocusedTargetSnapshot) throws -> String {
@@ -196,6 +221,7 @@ final class AccessibilityClient: FocusedInputControlling {
     ) throws {
         try revalidate(target)
         try system.setComposerValue(value, on: target.element)
+        target.consumeEquivalentFocusReplacementAllowance()
     }
 
     func waitUntilComposerValue(
@@ -357,7 +383,7 @@ final class AccessibilityClient: FocusedInputControlling {
         processIdentifier: pid_t,
         bundleIdentifier: String,
         window: AnyObject
-    ) throws -> AnyObject {
+    ) throws -> (element: AnyObject, wasAutoFocused: Bool) {
         let current: AnyObject?
         do {
             current = try resolveFocusedElement(
@@ -373,19 +399,22 @@ final class AccessibilityClient: FocusedInputControlling {
                 current,
                 expectedProcessIdentifier: processIdentifier
             ) {
-                return current
+                return (current, false)
             }
             guard bundleIdentifier == Self.codexBundleIdentifier else {
-                return current
+                return (current, false)
             }
         } else if bundleIdentifier != Self.codexBundleIdentifier {
             throw AXError.focusedElementUnavailable
         }
 
-        return try focusFirstEditableInput(
-            processIdentifier: processIdentifier,
-            bundleIdentifier: bundleIdentifier,
-            window: window
+        return (
+            try focusFirstEditableInput(
+                processIdentifier: processIdentifier,
+                bundleIdentifier: bundleIdentifier,
+                window: window
+            ),
+            true
         )
     }
 

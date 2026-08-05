@@ -429,6 +429,59 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertTrue(system.focusAttempts.isEmpty)
     }
 
+    func testAutoFocusedTargetRefreshesOneEquivalentAXReplacement() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 879)
+        system.focusedElementNode = system.sendButton
+        let client = AccessibilityClient(system: system)
+        let target = try client.captureTarget()
+        let replacement = system.replaceComposerWithEquivalentNode()
+
+        XCTAssertNoThrow(try client.revalidate(target))
+        XCTAssertTrue(system.elementsAreEqual(target.element, replacement))
+    }
+
+    func testAutoFocusedTargetRejectsSecondEquivalentAXReplacement() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 880)
+        system.focusedElementNode = system.sendButton
+        let client = AccessibilityClient(system: system)
+        let target = try client.captureTarget()
+        _ = system.replaceComposerWithEquivalentNode()
+        try client.revalidate(target)
+        _ = system.replaceComposerWithEquivalentNode()
+
+        assertTargetChanged { try client.revalidate(target) }
+    }
+
+    func testAutoFocusedTargetRejectsAXReplacementWithDifferentContext() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 8801)
+        system.focusedElementNode = system.sendButton
+        let client = AccessibilityClient(system: system)
+        let target = try client.captureTarget()
+        _ = system.replaceComposerWithEquivalentNode(title: "Different input")
+
+        assertTargetChanged { try client.revalidate(target) }
+    }
+
+    func testAutoFocusedTargetRejectsEquivalentAXReplacementAfterWrite() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 8802)
+        system.focusedElementNode = system.sendButton
+        let client = AccessibilityClient(system: system)
+        let target = try client.captureTarget()
+        try client.setComposerValue("可", in: target)
+        _ = system.replaceComposerWithEquivalentNode()
+
+        assertTargetChanged { try client.revalidate(target) }
+    }
+
+    func testNormallyFocusedTargetRejectsEquivalentAXReplacement() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 881)
+        let client = AccessibilityClient(system: system)
+        let target = try client.captureTarget()
+        _ = system.replaceComposerWithEquivalentNode()
+
+        assertTargetChanged { try client.revalidate(target) }
+    }
+
     private func assertTargetChanged(
         _ operation: () throws -> Void,
         file: StaticString = #filePath,
@@ -695,6 +748,26 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
                 role: "AXGroup"
             )
         }
+    }
+
+    func replaceComposerWithEquivalentNode(title: String? = nil) -> Node {
+        let replacement = Node(processIdentifier: frontmostPID)
+        replacement.parent = main
+        replacement.isFocused = true
+        childrenByNode[ObjectIdentifier(replacement)] = []
+        summariesByNode[ObjectIdentifier(replacement)] = makeSummary(
+            role: "AXTextArea",
+            title: title,
+            valueSettable: true
+        )
+        if let index = childrenByNode[ObjectIdentifier(main)]?.firstIndex(
+            where: { $0 === focusedElementNode }
+        ) {
+            childrenByNode[ObjectIdentifier(main)]?[index] = replacement
+        }
+        focusedElementNode?.isFocused = false
+        focusedElementNode = replacement
+        return replacement
     }
 
     func registerDetachedInput(_ node: Node) {

@@ -78,12 +78,38 @@ protocol ChatTargetAdapting {
     func classify(context: FocusedChatContext) throws -> ChatTargetMatch
 }
 
-struct FocusedTargetSnapshot {
+final class FocusedTargetSnapshot {
     let processIdentifier: pid_t
     let bundleIdentifier: String
     let window: AnyObject
-    let element: AnyObject
+    private(set) var element: AnyObject
     let context: FocusedChatContext
+    private(set) var allowsEquivalentFocusReplacement: Bool
+
+    init(
+        processIdentifier: pid_t,
+        bundleIdentifier: String,
+        window: AnyObject,
+        element: AnyObject,
+        context: FocusedChatContext,
+        allowsEquivalentFocusReplacement: Bool = false
+    ) {
+        self.processIdentifier = processIdentifier
+        self.bundleIdentifier = bundleIdentifier
+        self.window = window
+        self.element = element
+        self.context = context
+        self.allowsEquivalentFocusReplacement = allowsEquivalentFocusReplacement
+    }
+
+    func replaceAutoFocusedElement(_ element: AnyObject) {
+        self.element = element
+        allowsEquivalentFocusReplacement = false
+    }
+
+    func consumeEquivalentFocusReplacementAllowance() {
+        allowsEquivalentFocusReplacement = false
+    }
 }
 
 @MainActor
