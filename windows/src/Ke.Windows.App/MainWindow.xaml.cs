@@ -17,8 +17,7 @@ public partial class MainWindow : Window
     private const double DragThreshold = 6;
 
     private readonly PanelPositionStore _positionStore;
-    private GestureTracker? _gesture;
-    private DipPoint _grabOffset;
+    private PanelGestureController? _gesture;
     private HwndSource? _source;
 
     public MainWindow(PanelPositionStore positionStore)
@@ -28,9 +27,6 @@ public partial class MainWindow : Window
         _positionStore = positionStore;
         InitializeComponent();
 
-        var initialPosition = _positionStore.Load(Width, Height);
-        Left = initialPosition.X;
-        Top = initialPosition.Y;
         SourceInitialized += OnSourceInitialized;
     }
 
@@ -44,6 +40,7 @@ public partial class MainWindow : Window
 
         _source = HwndSource.FromHwnd(handle);
         _source?.AddHook(WindowMessageHook);
+        _positionStore.RestoreWindow(handle, Width, Height);
     }
 
     protected override void OnClosing(CancelEventArgs e)
@@ -75,9 +72,18 @@ public partial class MainWindow : Window
 
     private void OnMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        var cursor = GetCursorPositionInDip();
-        _gesture = new GestureTracker(cursor, DragThreshold);
-        _grabOffset = new DipPoint(cursor.X - Left, cursor.Y - Top);
+        var handle = new WindowInteropHelper(this).Handle;
+        if (!PhysicalWindowApi.TryGetCursor(out var cursor)
+            || !PhysicalWindowApi.TryGetTopLeft(handle, out var panelTopLeft))
+        {
+            return;
+        }
+
+        _gesture = new PanelGestureController(
+            cursor,
+            panelTopLeft,
+            PhysicalWindowApi.GetDpi(handle),
+            DragThreshold);
         Mouse.Capture(this, CaptureMode.Element);
         e.Handled = true;
     }
@@ -89,14 +95,19 @@ public partial class MainWindow : Window
             return;
         }
 
-        var cursor = GetCursorPositionInDip();
-        if (_gesture.MoveTo(cursor) != GestureDecision.Drag)
+        if (!PhysicalWindowApi.TryGetCursor(out var cursor))
         {
             return;
         }
 
-        Left = cursor.X - _grabOffset.X;
-        Top = cursor.Y - _grabOffset.Y;
+        var update = _gesture.MoveTo(cursor);
+        if (update.Decision != GestureDecision.Drag)
+        {
+            return;
+        }
+
+        var handle = new WindowInteropHelper(this).Handle;
+        PhysicalWindowApi.MoveWithoutActivation(handle, update.PanelTopLeft);
         e.Handled = true;
     }
 
@@ -107,19 +118,31 @@ public partial class MainWindow : Window
             return;
         }
 
-        var decision = _gesture.Release();
+        if (!PhysicalWindowApi.TryGetCursor(out var cursor))
+        {
+            _gesture = null;
+            Mouse.Capture(null);
+            e.Handled = true;
+            return;
+        }
+
+        var release = _gesture.ReleaseAt(cursor);
         _gesture = null;
         Mouse.Capture(null);
         e.Handled = true;
 
-        if (decision == GestureDecision.Drag)
+        if (release.ShouldPersist)
         {
             var handle = new WindowInteropHelper(this).Handle;
-            _positionStore.Save(handle, new DipPoint(Left, Top));
+            PhysicalWindowApi.MoveWithoutActivation(handle, release.PanelTopLeft);
+            _positionStore.Save(handle, Width, Height);
             return;
         }
 
-        SendRequested?.Invoke(this, EventArgs.Empty);
+        if (release.ShouldSend)
+        {
+            SendRequested?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     private void OnAboutClick(object sender, RoutedEventArgs e)
@@ -138,32 +161,10 @@ public partial class MainWindow : Window
         Application.Current.Shutdown();
     }
 
-    private DipPoint GetCursorPositionInDip()
-    {
-        if (!GetCursorPos(out var cursor))
-        {
-            return new DipPoint(Left + _grabOffset.X, Top + _grabOffset.Y);
-        }
-
-        var transform = _source?.CompositionTarget?.TransformFromDevice ?? System.Windows.Media.Matrix.Identity;
-        var dip = transform.Transform(new Point(cursor.X, cursor.Y));
-        return new DipPoint(dip.X, dip.Y);
-    }
-
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
     private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
 
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
     private static extern IntPtr SetWindowLongPtr(IntPtr window, int index, IntPtr newLong);
 
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetCursorPos(out NativePoint point);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private readonly struct NativePoint
-    {
-        public readonly int X;
-        public readonly int Y;
-    }
 }

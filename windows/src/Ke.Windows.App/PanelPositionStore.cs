@@ -8,8 +8,6 @@ namespace Ke.Windows.App;
 public sealed class PanelPositionStore
 {
     private const int MonitorDefaultToNearest = 2;
-    private const int EffectiveDpi = 0;
-    private const double DefaultDpi = 96;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.General);
 
@@ -28,22 +26,44 @@ public sealed class PanelPositionStore
         _settingsPath = settingsPath;
     }
 
-    public DipPoint Load(double panelWidth, double panelHeight)
+    public void RestoreWindow(IntPtr windowHandle, double panelWidthDip, double panelHeightDip)
     {
         var saved = ReadSavedPosition();
         var monitor = FindMonitor(saved?.DeviceName) ?? MonitorUnderCursor();
-        return PanelPlacement.Restore(saved, monitor.WorkArea, panelWidth, panelHeight);
+
+        PhysicalWindowApi.MoveWithoutActivation(
+            windowHandle,
+            new PhysicalPoint(monitor.WorkArea.Left, monitor.WorkArea.Top));
+
+        var targetDpi = PhysicalWindowApi.GetDpi(windowHandle);
+        var workArea = monitor.ToPhysicalWorkArea(targetDpi);
+        var target = PanelPlacement.Restore(saved, workArea, panelWidthDip, panelHeightDip);
+        var panelWidth = PanelPlacement.DipToPhysicalLength(panelWidthDip, targetDpi);
+        var panelHeight = PanelPlacement.DipToPhysicalLength(panelHeightDip, targetDpi);
+        PhysicalWindowApi.MoveAndSizeWithoutActivation(
+            windowHandle,
+            target,
+            panelWidth,
+            panelHeight);
     }
 
-    public void Save(IntPtr windowHandle, DipPoint position)
+    public void Save(IntPtr windowHandle, double panelWidthDip, double panelHeightDip)
     {
+        if (!PhysicalWindowApi.TryGetTopLeft(windowHandle, out var position))
+        {
+            return;
+        }
+
         var monitorHandle = MonitorFromWindow(windowHandle, MonitorDefaultToNearest);
         var monitor = ReadMonitor(monitorHandle) ?? MonitorUnderCursor();
+        var dpi = PhysicalWindowApi.GetDpi(windowHandle);
         var saved = PanelPlacement.Save(
             monitor.DeviceName,
-            monitor.WorkArea.Dpi,
+            dpi,
             position,
-            monitor.WorkArea);
+            monitor.ToPhysicalWorkArea(dpi),
+            panelWidthDip,
+            panelHeightDip);
 
         WriteAtomically(saved);
     }
@@ -129,14 +149,12 @@ public sealed class PanelPositionStore
 
     private static MonitorSnapshot MonitorUnderCursor()
     {
-        if (!GetCursorPos(out var cursor))
-        {
-            cursor = new NativePoint(0, 0);
-        }
-
+        var cursor = PhysicalWindowApi.TryGetCursor(out var physicalCursor)
+            ? new NativePoint(physicalCursor.X, physicalCursor.Y)
+            : new NativePoint(0, 0);
         var monitor = MonitorFromPoint(cursor, MonitorDefaultToNearest);
         return ReadMonitor(monitor)
-            ?? new MonitorSnapshot(string.Empty, new WorkArea(0, 0, 0, 0, DefaultDpi));
+            ?? new MonitorSnapshot(string.Empty, new NativeRectangle(0, 0, 0, 0));
     }
 
     private static MonitorSnapshot? ReadMonitor(IntPtr monitor)
@@ -150,29 +168,20 @@ public sealed class PanelPositionStore
         {
             Size = Marshal.SizeOf<MonitorInfoEx>()
         };
-        if (!GetMonitorInfo(monitor, ref info))
-        {
-            return null;
-        }
-
-        var dpi = ReadDpi(monitor);
-        var scale = dpi / DefaultDpi;
-        var workArea = new WorkArea(
-            info.WorkArea.Left / scale,
-            info.WorkArea.Top / scale,
-            (info.WorkArea.Right - info.WorkArea.Left) / scale,
-            (info.WorkArea.Bottom - info.WorkArea.Top) / scale,
-            dpi);
-        return new MonitorSnapshot(info.DeviceName, workArea);
+        return GetMonitorInfo(monitor, ref info)
+            ? new MonitorSnapshot(info.DeviceName, info.WorkArea)
+            : null;
     }
 
-    private static double ReadDpi(IntPtr monitor)
+    private sealed record MonitorSnapshot(string DeviceName, NativeRectangle WorkArea)
     {
-        var result = GetDpiForMonitor(monitor, EffectiveDpi, out var dpiX, out _);
-        return result == 0 && dpiX > 0 ? dpiX : DefaultDpi;
+        public PhysicalWorkArea ToPhysicalWorkArea(double dpi) => new(
+            WorkArea.Left,
+            WorkArea.Top,
+            WorkArea.Right - WorkArea.Left,
+            WorkArea.Bottom - WorkArea.Top,
+            dpi);
     }
-
-    private sealed record MonitorSnapshot(string DeviceName, WorkArea WorkArea);
 
     private delegate bool MonitorEnumProcedure(
         IntPtr monitor,
@@ -193,38 +202,35 @@ public sealed class PanelPositionStore
     private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfoEx monitorInfo);
 
     [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetCursorPos(out NativePoint point);
-
-    [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromPoint(NativePoint point, int flags);
 
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromWindow(IntPtr window, int flags);
 
-    [DllImport("shcore.dll")]
-    private static extern int GetDpiForMonitor(
-        IntPtr monitor,
-        int dpiType,
-        out uint dpiX,
-        out uint dpiY);
-
     [StructLayout(LayoutKind.Sequential)]
-    private struct NativePoint
+    private readonly struct NativePoint
     {
-        public NativePoint(int x, int y)
+        public NativePoint(double x, double y)
         {
-            X = x;
-            Y = y;
+            X = checked((int)Math.Round(x));
+            Y = checked((int)Math.Round(y));
         }
 
-        public int X;
-        public int Y;
+        public readonly int X;
+        public readonly int Y;
     }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeRectangle
     {
+        public NativeRectangle(int left, int top, int right, int bottom)
+        {
+            Left = left;
+            Top = top;
+            Right = right;
+            Bottom = bottom;
+        }
+
         public int Left;
         public int Top;
         public int Right;
