@@ -16,6 +16,7 @@ public static class PortableArchiveVerifier
     private const double MaximumCompressionRatio = 200.0;
     private const int CopyBufferBytes = 81920;
     private static readonly UTF8Encoding Utf8NoBom = new(false, true);
+    private static readonly uint[] Crc32Table = CreateCrc32Table();
     private static readonly string[] ExpectedNames =
         { "可.exe", "README.md", "LICENSE", "SHA256SUMS.txt" };
 
@@ -179,6 +180,7 @@ public static class PortableArchiveVerifier
             FileOptions.SequentialScan);
         var buffer = new byte[CopyBufferBytes];
         long written = 0;
+        var crc32 = uint.MaxValue;
         while (true)
         {
             var read = input.Read(buffer, 0, buffer.Length);
@@ -194,12 +196,47 @@ public static class PortableArchiveVerifier
             }
 
             output.Write(buffer, 0, read);
+            crc32 = UpdateCrc32(crc32, buffer, read);
         }
 
         if (written != entry.Length)
         {
             throw new InvalidDataException("Portable ZIP entry length disagrees with central directory");
         }
+
+        if (~crc32 != entry.Crc32)
+        {
+            throw new InvalidDataException(
+                $"Portable ZIP entry CRC-32 mismatch: {entry.FullName}");
+        }
+    }
+
+    private static uint UpdateCrc32(uint crc32, byte[] buffer, int count)
+    {
+        for (var index = 0; index < count; index++)
+        {
+            crc32 = Crc32Table[(crc32 ^ buffer[index]) & 0xFF] ^ (crc32 >> 8);
+        }
+
+        return crc32;
+    }
+
+    private static uint[] CreateCrc32Table()
+    {
+        const uint polynomial = 0xEDB88320;
+        var table = new uint[256];
+        for (var index = 0; index < table.Length; index++)
+        {
+            var value = (uint)index;
+            for (var bit = 0; bit < 8; bit++)
+            {
+                value = (value >> 1) ^ ((value & 1) == 0 ? 0 : polynomial);
+            }
+
+            table[index] = value;
+        }
+
+        return table;
     }
 
     private static void VerifyExtractedHash(string destinationDirectory)
@@ -329,6 +366,17 @@ public static class PortableArchiveVerifier
                         Utf8NoBom.GetBytes($"{new string('0', 64)}  可.exe\n"))
                     : entry));
 
+            var payloadCorruptArchive = Path.Combine(root, "payload-corrupt.zip");
+            WriteArchive(
+                payloadCorruptArchive,
+                validEntries,
+                CompressionLevel.NoCompression);
+            FlipStoredEntryPayloadBit(payloadCorruptArchive, "README.md");
+            ExpectRejectedArchive(
+                root,
+                "stored entry payload CRC mismatch",
+                payloadCorruptArchive);
+
             var corruptArchive = Path.Combine(root, "corrupt.zip");
             File.Copy(validArchive, corruptArchive);
             using (var stream = new FileStream(
@@ -409,15 +457,86 @@ public static class PortableArchiveVerifier
 
     private static void WriteArchive(
         string archivePath,
-        IEnumerable<ArchiveTestEntry> entries)
+        IEnumerable<ArchiveTestEntry> entries,
+        CompressionLevel compressionLevel = CompressionLevel.Optimal)
     {
         using var archive = ZipFile.Open(archivePath, ZipArchiveMode.Create, Utf8NoBom);
         foreach (var fixture in entries)
         {
-            var entry = archive.CreateEntry(fixture.Name, CompressionLevel.Optimal);
+            var entry = archive.CreateEntry(fixture.Name, compressionLevel);
             using var output = entry.Open();
             output.Write(fixture.Data);
         }
+    }
+
+    private static void FlipStoredEntryPayloadBit(string archivePath, string entryName)
+    {
+        const uint localHeaderSignature = 0x04034B50;
+        using var stream = new FileStream(
+            archivePath,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None);
+        using var reader = new BinaryReader(stream, Utf8NoBom, leaveOpen: true);
+        while (stream.Position <= stream.Length - 30)
+        {
+            if (reader.ReadUInt32() != localHeaderSignature)
+            {
+                break;
+            }
+
+            _ = reader.ReadUInt16();
+            var flags = reader.ReadUInt16();
+            var compressionMethod = reader.ReadUInt16();
+            _ = reader.ReadUInt16();
+            _ = reader.ReadUInt16();
+            _ = reader.ReadUInt32();
+            var compressedSize = reader.ReadUInt32();
+            var uncompressedSize = reader.ReadUInt32();
+            var nameLength = reader.ReadUInt16();
+            var extraLength = reader.ReadUInt16();
+            var nameBytes = reader.ReadBytes(nameLength);
+            if (nameBytes.Length != nameLength ||
+                stream.Position > stream.Length - extraLength)
+            {
+                throw new InvalidOperationException("ZIP self-test local header is truncated");
+            }
+
+            var name = Utf8NoBom.GetString(nameBytes);
+            stream.Position = checked(stream.Position + extraLength);
+            var dataOffset = stream.Position;
+            if ((flags & 0x0008) != 0 ||
+                dataOffset > stream.Length - compressedSize)
+            {
+                throw new InvalidOperationException(
+                    "ZIP self-test requires bounded local entry sizes");
+            }
+
+            if (string.Equals(name, entryName, StringComparison.Ordinal))
+            {
+                if (compressionMethod != 0 || compressedSize == 0 ||
+                    compressedSize != uncompressedSize)
+                {
+                    throw new InvalidOperationException(
+                        "ZIP self-test target must be a nonempty stored entry");
+                }
+
+                var value = stream.ReadByte();
+                if (value < 0)
+                {
+                    throw new InvalidOperationException(
+                        "ZIP self-test target payload is truncated");
+                }
+
+                stream.Position = dataOffset;
+                stream.WriteByte((byte)(value ^ 0x01));
+                return;
+            }
+
+            stream.Position = checked(dataOffset + compressedSize);
+        }
+
+        throw new InvalidOperationException("ZIP self-test target entry was not found");
     }
 
     private sealed record ArchiveTestEntry(string Name, byte[] Data);
