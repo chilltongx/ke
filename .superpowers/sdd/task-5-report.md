@@ -90,3 +90,30 @@ No production implementation existed when this RED was captured.
 ## Concerns
 
 - WindowsDesktop tests must pass on GitHub Windows CI before W5 is accepted.
+
+## Critical ABI review fix
+
+Review found that the initial `INPUT` union contained only `KEYBDINPUT`. On x64,
+that made `Marshal.SizeOf<NativeInput>()` return 32 even though Win32 requires
+`INPUT` and `SendInput.cbSize` to be 40 bytes.
+
+The regression test was written first. A pure `net10.0` runner linked the actual
+pre-fix `NativeMethods.cs` and produced the valid RED:
+
+```text
+NativeInput size: expected 40, actual 32
+exit=1
+```
+
+The union now overlays the complete Win32 `KEYBDINPUT`, `MOUSEINPUT`, and
+`HARDWAREINPUT` members at offset zero. The same runner then produced GREEN:
+
+```text
+NativeInput=40, Type@0, Data@8, Mouse=32, Keyboard=24, Hardware=8
+exit=0
+```
+
+`WindowsInputWriterTests` now asserts those sizes and offsets. It also exercises
+the production `WindowsInputNative` adapter through an `IUser32InputApi` fake and
+proves that the adapter forwards two keyboard inputs with
+`cbSize == Marshal.SizeOf<NativeInput>() == 40`; no input size is hard-coded.

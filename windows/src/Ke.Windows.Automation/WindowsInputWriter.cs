@@ -46,6 +46,82 @@ internal interface IWindowsInputNative
     uint SendInput(IReadOnlyList<KeyboardInputCommand> inputs);
 }
 
+internal interface IUser32InputApi
+{
+    nint GetForegroundWindow();
+
+    uint GetWindowProcessId(nint hwnd);
+
+    short GetAsyncKeyState(int virtualKey);
+
+    uint SendInput(
+        uint inputCount,
+        NativeMethods.NativeInput[] inputs,
+        int inputSize);
+}
+
+internal sealed class WindowsInputNative : IWindowsInputNative
+{
+    private readonly IUser32InputApi _api;
+
+    public WindowsInputNative()
+        : this(new User32InputApi())
+    {
+    }
+
+    internal WindowsInputNative(IUser32InputApi api)
+    {
+        _api = api;
+    }
+
+    public nint GetForegroundWindow() => _api.GetForegroundWindow();
+
+    public uint GetWindowProcessId(nint hwnd) => _api.GetWindowProcessId(hwnd);
+
+    public short GetAsyncKeyState(int virtualKey) => _api.GetAsyncKeyState(virtualKey);
+
+    public uint SendInput(IReadOnlyList<KeyboardInputCommand> inputs)
+    {
+        var nativeInputs = inputs.Select(command => new NativeMethods.NativeInput
+        {
+            Type = NativeMethods.InputKeyboard,
+            Data = new NativeMethods.InputUnion
+            {
+                Keyboard = new NativeMethods.KeyboardInput
+                {
+                    VirtualKey = command.VirtualKey,
+                    ScanCode = command.ScanCode,
+                    Flags = command.Flags
+                }
+            }
+        }).ToArray();
+        return _api.SendInput(
+            checked((uint)nativeInputs.Length),
+            nativeInputs,
+            Marshal.SizeOf<NativeMethods.NativeInput>());
+    }
+
+    private sealed class User32InputApi : IUser32InputApi
+    {
+        public nint GetForegroundWindow() => NativeMethods.GetForegroundWindow();
+
+        public uint GetWindowProcessId(nint hwnd)
+        {
+            var threadId = NativeMethods.GetWindowThreadProcessId(hwnd, out var processId);
+            return threadId == 0 ? 0 : processId;
+        }
+
+        public short GetAsyncKeyState(int virtualKey) =>
+            NativeMethods.GetAsyncKeyState(virtualKey);
+
+        public uint SendInput(
+            uint inputCount,
+            NativeMethods.NativeInput[] inputs,
+            int inputSize) =>
+            NativeMethods.SendInput(inputCount, inputs, inputSize);
+    }
+}
+
 internal interface IWriterAutomationBackend
 {
     IFocusedInputElement GetFocusedElement(CancellationToken cancellationToken);
@@ -176,41 +252,6 @@ public sealed class WindowsInputWriter : IWindowsInputWriter
     }
 
     private static TextWriteResult FailedWrite() => new(false, null);
-
-    private sealed class WindowsInputNative : IWindowsInputNative
-    {
-        public nint GetForegroundWindow() => NativeMethods.GetForegroundWindow();
-
-        public uint GetWindowProcessId(nint hwnd)
-        {
-            var threadId = NativeMethods.GetWindowThreadProcessId(hwnd, out var processId);
-            return threadId == 0 ? 0 : processId;
-        }
-
-        public short GetAsyncKeyState(int virtualKey) =>
-            NativeMethods.GetAsyncKeyState(virtualKey);
-
-        public uint SendInput(IReadOnlyList<KeyboardInputCommand> inputs)
-        {
-            var nativeInputs = inputs.Select(command => new NativeMethods.NativeInput
-            {
-                Type = NativeMethods.InputKeyboard,
-                Data = new NativeMethods.InputUnion
-                {
-                    Keyboard = new NativeMethods.KeyboardInput
-                    {
-                        VirtualKey = command.VirtualKey,
-                        ScanCode = command.ScanCode,
-                        Flags = command.Flags
-                    }
-                }
-            }).ToArray();
-            return NativeMethods.SendInput(
-                checked((uint)nativeInputs.Length),
-                nativeInputs,
-                Marshal.SizeOf<NativeMethods.NativeInput>());
-        }
-    }
 
     private sealed class WriterAutomationBackend : IWriterAutomationBackend
     {

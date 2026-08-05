@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Ke.Windows.Automation;
 using Ke.Windows.Core;
 using Xunit;
@@ -8,6 +9,37 @@ public sealed class WindowsInputWriterTests
 {
     private static readonly TargetIdentity Expected =
         new((nint)42, 99, "42.7", SupportedApplication.Codex);
+
+    [Fact]
+    public void Native_input_layout_matches_the_Win32_x64_ABI()
+    {
+        Assert.Equal(40, Marshal.SizeOf<NativeMethods.NativeInput>());
+        Assert.Equal(0, Marshal.OffsetOf<NativeMethods.NativeInput>("Type").ToInt32());
+        Assert.Equal(8, Marshal.OffsetOf<NativeMethods.NativeInput>("Data").ToInt32());
+        Assert.Equal(32, Marshal.SizeOf<NativeMethods.MouseInput>());
+        Assert.Equal(24, Marshal.SizeOf<NativeMethods.KeyboardInput>());
+        Assert.Equal(8, Marshal.SizeOf<NativeMethods.HardwareInput>());
+    }
+
+    [Fact]
+    public void Native_adapter_passes_the_actual_INPUT_size_to_SendInput()
+    {
+        var api = new RecordingUser32InputApi();
+        var native = new WindowsInputNative(api);
+
+        var accepted = native.SendInput(
+        [
+            new(0, '可', NativeMethods.KeyEventUnicode),
+            new(0, '可', NativeMethods.KeyEventUnicode | NativeMethods.KeyEventKeyUp)
+        ]);
+
+        Assert.Equal(2u, accepted);
+        Assert.Equal(2u, api.InputCount);
+        Assert.Equal(40, api.InputSize);
+        Assert.Equal(Marshal.SizeOf<NativeMethods.NativeInput>(), api.InputSize);
+        Assert.Equal(2, api.Inputs!.Length);
+        Assert.All(api.Inputs, input => Assert.Equal(NativeMethods.InputKeyboard, input.Type));
+    }
 
     [Fact]
     public void Writable_value_pattern_is_preferred_without_native_keyboard_input()
@@ -243,6 +275,32 @@ public sealed class WindowsInputWriterTests
             events.Add("send-input");
             InputBatches.Add(inputs.ToArray());
             return AcceptedInputCount;
+        }
+    }
+
+    private sealed class RecordingUser32InputApi : IUser32InputApi
+    {
+        public uint InputCount { get; private set; }
+
+        public NativeMethods.NativeInput[]? Inputs { get; private set; }
+
+        public int InputSize { get; private set; }
+
+        public nint GetForegroundWindow() => (nint)42;
+
+        public uint GetWindowProcessId(nint hwnd) => 99;
+
+        public short GetAsyncKeyState(int virtualKey) => 0;
+
+        public uint SendInput(
+            uint inputCount,
+            NativeMethods.NativeInput[] inputs,
+            int inputSize)
+        {
+            InputCount = inputCount;
+            Inputs = inputs;
+            InputSize = inputSize;
+            return inputCount;
         }
     }
 
