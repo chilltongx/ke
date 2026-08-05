@@ -23,7 +23,8 @@ $expectedDescription = '向当前空聊天输入框安全发送“可”'
 $allowedNames = @('LICENSE', 'README.md', 'SHA256SUMS.txt', '可.exe')
 $verifierSources = @(
     (Join-Path $PSScriptRoot 'PortablePeVerifier.cs'),
-    (Join-Path $PSScriptRoot 'PortableArchiveVerifier.cs')
+    (Join-Path $PSScriptRoot 'PortableArchiveVerifier.cs'),
+    (Join-Path $PSScriptRoot 'PortableWindowVerifier.cs')
 )
 Add-Type -Path $verifierSources
 
@@ -123,6 +124,7 @@ function Assert-SingleInstanceAndCleanExit {
 
     $first = $null
     $second = $null
+    $firstWindow = [IntPtr]::Zero
     try {
         $first = Start-Process -FilePath $Executable -PassThru
         $startupDeadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -130,10 +132,11 @@ function Assert-SingleInstanceAndCleanExit {
             Start-Sleep -Milliseconds 100
             $first.Refresh()
             Assert-Condition (-not $first.HasExited) 'First app instance exited during startup'
-        } while ($first.MainWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $startupDeadline)
+            $firstWindow = [PortableWindowVerifier]::FindClosableTopLevelWindow($first.Id)
+        } while ($firstWindow -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $startupDeadline)
 
-        Assert-Condition ($first.MainWindowHandle -ne [IntPtr]::Zero) `
-            'First app did not expose a main window during startup'
+        Assert-Condition ($firstWindow -ne [IntPtr]::Zero) `
+            'First app did not expose a closable top-level window during startup'
 
         $second = Start-Process -FilePath $Executable -PassThru
         Assert-Condition ($second.WaitForExit(5000)) 'Second app instance stayed alive'
@@ -141,7 +144,13 @@ function Assert-SingleInstanceAndCleanExit {
 
         $first.Refresh()
         Assert-Condition (-not $first.HasExited) 'First app instance exited unexpectedly'
-        Assert-Condition $first.CloseMainWindow() 'First app did not expose a closable main window'
+        if (-not [PortableWindowVerifier]::IsExactProcessWindow($firstWindow, $first.Id)) {
+            $firstWindow = [PortableWindowVerifier]::FindClosableTopLevelWindow($first.Id)
+        }
+        Assert-Condition (
+            [PortableWindowVerifier]::IsExactProcessWindow($firstWindow, $first.Id)
+        ) 'First app no longer owns a closable top-level window'
+        [PortableWindowVerifier]::PostClose($firstWindow, $first.Id)
         Assert-Condition ($first.WaitForExit(5000)) 'First app did not exit cleanly'
         Assert-Condition ($first.ExitCode -eq 0) 'First app instance did not exit successfully'
     }
@@ -218,7 +227,8 @@ function Assert-PortableArchive {
 if ($SelfTest) {
     [PortablePeVerifier]::RunSelfTests()
     [PortableArchiveVerifier]::RunSelfTests()
-    Write-Host 'Portable PE and archive verifier self-tests passed.'
+    [PortableWindowVerifier]::RunSelfTests()
+    Write-Host 'Portable PE, archive, and window verifier self-tests passed.'
     return
 }
 
