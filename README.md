@@ -1,8 +1,12 @@
 # 可
 
-一个跟随当前光标、向空聊天输入框发送“可”的 macOS 悬浮按钮。光环只显示周额度。
+一个跟随当前光标、向空聊天输入框发送“可”的悬浮按钮。
 
-## 安装
+## macOS
+
+macOS 版光环只显示周额度。
+
+### 安装
 
 ```bash
 zsh scripts/setup-local-signing.sh
@@ -21,7 +25,7 @@ zsh scripts/install-local.sh
 
 安装后只授予“辅助功能”权限。
 
-## 使用
+### 使用
 
 - 点击 Dock 中的“Codex 可”，悬浮按钮立即出现并保持可见。
 - 在 Codex、Visual Studio Code 侧边栏聊天、微信或其他受支持聊天应用中聚焦空输入框。
@@ -32,18 +36,26 @@ zsh scripts/install-local.sh
 - 应用不会开机自启，也不依赖 Codex Hook。
 - 灰色光环表示周额度暂不可用，不代表额度为零。
 
-## 安全边界
+### 安全边界
 
 原生审批卡片不受支持；输入框已有草稿时不会覆盖或发送；当前焦点无法安全确认为聊天框时失败。
 发送前会再次确认前台应用、窗口、输入框和内容未变化；不会自动切换到其他应用。
 签名初始化会生成临时私钥材料并在退出时删除，不输出私钥；它不会修改 Dock、
 TCC、登录项或 Codex 会话数据。
 
-## 卸载
+### 卸载
 
 ```bash
 zsh scripts/uninstall-local.sh
 ```
+
+## Windows 11 x64 测试版
+
+从 GitHub Release 下载 `可-windows-x64.zip`，完整解压后运行 `可.exe`。Windows 版仅支持
+Codex 和 Visual Studio Code 的空聊天输入框，无全局快捷键、托盘或周额度。
+
+详细安全边界、SmartScreen 说明和 SHA-256 校验命令见
+[Windows 使用说明](windows/README.md)。
 
 ## 许可证
 

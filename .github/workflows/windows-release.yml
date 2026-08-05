@@ -1,0 +1,44 @@
+name: Windows pre-release
+
+on:
+  push:
+    tags:
+      - "windows-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Build portable package
+        shell: pwsh
+        run: ./windows/scripts/build-portable.ps1
+
+      - name: Verify portable package
+        shell: pwsh
+        run: ./windows/scripts/verify-portable.ps1 -DistDirectory './windows/dist/可-windows-x64'
+
+      - name: Create GitHub pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create '${{ github.ref_name }}' `
+            --verify-tag `
+            --prerelease `
+            --title '可 Windows 测试版 ${{ github.ref_name }}' `
+            --notes-file './windows/RELEASE_NOTES.md' `
+            './windows/dist/可-windows-x64.zip' `
+            './windows/dist/可-windows-x64/SHA256SUMS.txt'
