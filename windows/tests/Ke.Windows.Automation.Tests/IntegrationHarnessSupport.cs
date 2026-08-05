@@ -208,21 +208,42 @@ internal sealed record HarnessTeardownResult(
 
 internal static class HarnessProcessTeardown
 {
-    private static readonly TimeSpan ForcedExitTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DefaultForcedExitTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ExitPollInterval = TimeSpan.FromMilliseconds(20);
 
     internal static async Task<HarnessTeardownResult> CloseExactAsync(
         Process process,
         TimeSpan closeTimeout) =>
-        await CloseExactAsync(process, closeTimeout, descendantConfirmed: null)
+        await CloseExactAsync(
+                process,
+                closeTimeout,
+                descendantConfirmed: null,
+                DefaultForcedExitTimeout)
             .ConfigureAwait(false);
 
     internal static async Task<HarnessTeardownResult> CloseExactAsync(
         Process process,
         TimeSpan closeTimeout,
-        Action<uint>? descendantConfirmed)
+        Action<uint>? descendantConfirmed) =>
+        await CloseExactAsync(
+                process,
+                closeTimeout,
+                descendantConfirmed,
+                DefaultForcedExitTimeout)
+            .ConfigureAwait(false);
+
+    internal static async Task<HarnessTeardownResult> CloseExactAsync(
+        Process process,
+        TimeSpan closeTimeout,
+        Action<uint>? descendantConfirmed,
+        TimeSpan forcedExitTimeout)
     {
         ArgumentNullException.ThrowIfNull(process);
+        if (forcedExitTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(forcedExitTimeout));
+        }
+
         var forced = false;
         using var descendants = new ExactDescendantTracker(process, descendantConfirmed);
         descendants.Discover();
@@ -230,21 +251,37 @@ internal static class HarnessProcessTeardown
         if (!process.HasExited)
         {
             _ = process.CloseMainWindow();
-            if (!await WaitForExactTreeExitAsync(
-                    process,
-                    descendants,
-                    closeTimeout).ConfigureAwait(false))
+        }
+
+        if (!await WaitForExactTreeExitAsync(
+                process,
+                descendants,
+                closeTimeout).ConfigureAwait(false))
+        {
+            forced = true;
+            descendants.Discover();
+            try
             {
-                forced = true;
-                descendants.Discover();
-                process.Kill(entireProcessTree: true);
-                descendants.KillRemainingExact();
-                _ = await WaitForExactTreeExitAsync(
-                    process,
-                    descendants,
-                    ForcedExitTimeout,
-                    terminateDescendants: true).ConfigureAwait(false);
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
             }
+            catch (InvalidOperationException)
+            {
+                // Root exited after the exact identity check.
+            }
+            catch (Win32Exception)
+            {
+                // Continue exact descendant cleanup and report a live root below.
+            }
+
+            descendants.KillRemainingExact();
+            _ = await WaitForExactTreeExitAsync(
+                process,
+                descendants,
+                forcedExitTimeout,
+                terminateDescendants: true).ConfigureAwait(false);
         }
 
         descendants.Discover();
@@ -318,16 +355,20 @@ internal static class HarnessProcessTeardown
 internal sealed class ExactDescendantTracker : IDisposable
 {
     private readonly Dictionary<uint, List<TrackedProcessIdentity>> _identities = [];
-    private readonly Dictionary<uint, uint> _unresolvedProcessIds = [];
-    private readonly Action<uint>? _descendantConfirmed;
+    private readonly Dictionary<uint, ProcessTreeEntry> _unresolvedObservations = [];
+    private readonly HashSet<uint> _observedProcessIds = [];
+    private readonly Action<uint>? _descendantObserved;
+    private readonly Func<uint, bool>? _identityUnavailable;
     private int _disposed;
 
     internal ExactDescendantTracker(
         Process root,
-        Action<uint>? descendantConfirmed = null)
+        Action<uint>? descendantObserved = null,
+        Func<uint, bool>? identityUnavailable = null)
     {
         ArgumentNullException.ThrowIfNull(root);
-        _descendantConfirmed = descendantConfirmed;
+        _descendantObserved = descendantObserved;
+        _identityUnavailable = identityUnavailable;
         AddIdentity(TrackedProcessIdentity.BorrowRoot(root));
     }
 
@@ -340,25 +381,21 @@ internal sealed class ExactDescendantTracker : IDisposable
         }
 
         var firstSnapshot = ProcessTreeInspector.Capture();
-        foreach (var processId in _unresolvedProcessIds.Keys.ToArray())
-        {
-            if (!firstSnapshot.Contains(processId))
-            {
-                _unresolvedProcessIds.Remove(processId);
-            }
-        }
-
-        var confirmedParentIds = _identities.Keys.ToHashSet();
-        foreach (var candidate in firstSnapshot.FindDescendantsFrom(confirmedParentIds))
+        var ancestryFrontier = _identities.Keys
+            .Concat(_unresolvedObservations.Keys)
+            .ToHashSet();
+        foreach (var candidate in firstSnapshot.FindDescendantsFrom(ancestryFrontier))
         {
             var confirmation = ConfirmCandidate(candidate);
             if (confirmation == CandidateConfirmation.Unresolved)
             {
-                _unresolvedProcessIds[candidate.ProcessId] = candidate.ParentProcessId;
+                _unresolvedObservations.TryAdd(candidate.ProcessId, candidate);
+                NotifyObserved(candidate.ProcessId);
             }
-            else if (confirmation != CandidateConfirmation.AlreadyConfirmed)
+            else if (confirmation == CandidateConfirmation.Confirmed)
             {
-                _unresolvedProcessIds.Remove(candidate.ProcessId);
+                _unresolvedObservations.Remove(candidate.ProcessId);
+                NotifyObserved(candidate.ProcessId);
             }
         }
     }
@@ -378,7 +415,10 @@ internal sealed class ExactDescendantTracker : IDisposable
             }
             catch (Win32Exception)
             {
-                _unresolvedProcessIds[identity.ProcessId] = identity.ParentProcessId;
+                var observation = new ProcessTreeEntry(
+                    identity.ProcessId,
+                    identity.ParentProcessId);
+                _unresolvedObservations.TryAdd(identity.ProcessId, observation);
             }
         }
     }
@@ -389,7 +429,7 @@ internal sealed class ExactDescendantTracker : IDisposable
         return DescendantIdentities()
             .Where(identity => !identity.HasExited)
             .Select(identity => identity.ProcessId)
-            .Concat(_unresolvedProcessIds.Keys)
+            .Concat(_unresolvedObservations.Keys)
             .Distinct()
             .Order()
             .ToArray();
@@ -408,7 +448,8 @@ internal sealed class ExactDescendantTracker : IDisposable
         }
 
         _identities.Clear();
-        _unresolvedProcessIds.Clear();
+        _unresolvedObservations.Clear();
+        _observedProcessIds.Clear();
     }
 
     private CandidateConfirmation ConfirmCandidate(ProcessTreeEntry candidateEntry)
@@ -417,6 +458,13 @@ internal sealed class ExactDescendantTracker : IDisposable
         Process? verification = null;
         try
         {
+            if (_identityUnavailable?.Invoke(candidateEntry.ProcessId) == true ||
+                !_identities.ContainsKey(candidateEntry.ParentProcessId) &&
+                _unresolvedObservations.ContainsKey(candidateEntry.ParentProcessId))
+            {
+                return CandidateConfirmation.Unresolved;
+            }
+
             candidate = Process.GetProcessById(checked((int)candidateEntry.ProcessId));
             _ = candidate.Handle;
             var candidateStartTime = candidate.StartTime.ToUniversalTime();
@@ -457,7 +505,6 @@ internal sealed class ExactDescendantTracker : IDisposable
                 candidateStartTime,
                 ownsProcess: true));
             candidate = null;
-            _descendantConfirmed?.Invoke(candidateEntry.ProcessId);
             return CandidateConfirmation.Confirmed;
         }
         catch (ArgumentException)
@@ -507,6 +554,14 @@ internal sealed class ExactDescendantTracker : IDisposable
         }
 
         identities.Add(identity);
+    }
+
+    private void NotifyObserved(uint processId)
+    {
+        if (_observedProcessIds.Add(processId))
+        {
+            _descendantObserved?.Invoke(processId);
+        }
     }
 
     private IEnumerable<TrackedProcessIdentity> DescendantIdentities() =>
