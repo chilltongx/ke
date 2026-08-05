@@ -1,8 +1,11 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Verify')]
     [ValidateNotNullOrEmpty()]
-    [string]$DistDirectory
+    [string]$DistDirectory,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'SelfTest')]
+    [switch]$SelfTest
 )
 
 Set-StrictMode -Version Latest
@@ -10,6 +13,8 @@ $ErrorActionPreference = 'Stop'
 
 $expectedDescription = '向当前空聊天输入框安全发送“可”'
 $allowedNames = @('LICENSE', 'README.md', 'SHA256SUMS.txt', '可.exe')
+$peVerifierSource = Join-Path $PSScriptRoot 'PortablePeVerifier.cs'
+Add-Type -Path $peVerifierSource
 
 function Assert-Condition {
     param(
@@ -68,29 +73,7 @@ function Assert-PortableHash {
 function Assert-PeMetadata {
     param([Parameter(Mandatory = $true)][string]$Executable)
 
-    $bytes = [IO.File]::ReadAllBytes($Executable)
-    Assert-Condition ($bytes.Length -ge 256) 'Not a PE executable'
-    Assert-Condition ($bytes[0] -eq 0x4D -and $bytes[1] -eq 0x5A) 'Not a PE executable'
-
-    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
-    Assert-Condition ($peOffset -ge 0x40 -and ($peOffset + 0x100) -le $bytes.Length) `
-        'Invalid PE header offset'
-    Assert-Condition (
-        $bytes[$peOffset] -eq 0x50 -and
-        $bytes[$peOffset + 1] -eq 0x45 -and
-        $bytes[$peOffset + 2] -eq 0x00 -and
-        $bytes[$peOffset + 3] -eq 0x00
-    ) 'Invalid PE signature'
-
-    $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
-    Assert-Condition ($machine -eq 0x8664) 'Executable machine must be x64 (0x8664)'
-
-    $optionalHeader = $peOffset + 24
-    $optionalMagic = [BitConverter]::ToUInt16($bytes, $optionalHeader)
-    Assert-Condition ($optionalMagic -eq 0x20B) 'Executable must use a PE32+ optional header'
-
-    $subsystem = [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
-    Assert-Condition ($subsystem -eq 2) 'Executable subsystem must be Windows GUI (2)'
+    [PortablePeVerifier]::Verify($Executable)
 
     $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($Executable)
     Assert-Condition ($version.ProductName -ceq '可') 'ProductName resource must be 可'
@@ -100,105 +83,6 @@ function Assert-PeMetadata {
         'ProductVersion resource must be 1.0.0'
     Assert-Condition ($version.FileVersion -match '^1\.0\.0\.0(?:\s.*)?$') `
         'FileVersion resource must be 1.0.0.0'
-
-    if ($null -eq ('PortableResourceReader' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-
-public static class PortableResourceReader
-{
-    private const uint LoadLibraryAsDataFile = 0x00000002;
-    private const uint LoadLibraryAsImageResource = 0x00000020;
-    private static readonly IntPtr GroupIconType = new IntPtr(14);
-
-    private delegate bool EnumResourceNameCallback(
-        IntPtr module,
-        IntPtr type,
-        IntPtr name,
-        IntPtr parameter);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr LoadLibraryEx(
-        string fileName,
-        IntPtr file,
-        uint flags);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool EnumResourceNames(
-        IntPtr module,
-        IntPtr type,
-        EnumResourceNameCallback callback,
-        IntPtr parameter);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr FindResource(
-        IntPtr module,
-        IntPtr name,
-        IntPtr type);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr LoadResource(IntPtr module, IntPtr resource);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr LockResource(IntPtr resourceData);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint SizeofResource(IntPtr module, IntPtr resource);
-
-    [DllImport("kernel32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool FreeLibrary(IntPtr module);
-
-    public static int GetMaximumGroupIconFrameCount(string executable)
-    {
-        var module = LoadLibraryEx(
-            executable,
-            IntPtr.Zero,
-            LoadLibraryAsDataFile | LoadLibraryAsImageResource);
-        if (module == IntPtr.Zero)
-        {
-            return 0;
-        }
-
-        try
-        {
-            var maximum = 0;
-            EnumResourceNameCallback callback = (loadedModule, type, name, parameter) =>
-            {
-                var resource = FindResource(loadedModule, name, GroupIconType);
-                if (resource == IntPtr.Zero || SizeofResource(loadedModule, resource) < 6)
-                {
-                    return true;
-                }
-
-                var data = LoadResource(loadedModule, resource);
-                var pointer = data == IntPtr.Zero ? IntPtr.Zero : LockResource(data);
-                if (pointer != IntPtr.Zero)
-                {
-                    maximum = Math.Max(maximum, (ushort)Marshal.ReadInt16(pointer, 4));
-                }
-
-                return true;
-            };
-
-            EnumResourceNames(module, GroupIconType, callback, IntPtr.Zero);
-            GC.KeepAlive(callback);
-            return maximum;
-        }
-        finally
-        {
-            FreeLibrary(module);
-        }
-    }
-}
-'@
-    }
-
-    $iconFrameCount = [PortableResourceReader]::GetMaximumGroupIconFrameCount($Executable)
-    Assert-Condition ($iconFrameCount -eq 7) `
-        'Executable group icon must contain exactly 7 image frames'
 }
 
 function Stop-ExactProcess {
@@ -242,16 +126,24 @@ function Assert-SingleInstanceAndCleanExit {
 
         $second = Start-Process -FilePath $Executable -PassThru
         Assert-Condition ($second.WaitForExit(5000)) 'Second app instance stayed alive'
+        Assert-Condition ($second.ExitCode -eq 0) 'Second app instance did not exit successfully'
 
         $first.Refresh()
         Assert-Condition (-not $first.HasExited) 'First app instance exited unexpectedly'
         Assert-Condition $first.CloseMainWindow() 'First app did not expose a closable main window'
         Assert-Condition ($first.WaitForExit(5000)) 'First app did not exit cleanly'
+        Assert-Condition ($first.ExitCode -eq 0) 'First app instance did not exit successfully'
     }
     finally {
         Stop-ExactProcess $second
         Stop-ExactProcess $first
     }
+}
+
+if ($SelfTest) {
+    [PortablePeVerifier]::RunSelfTests()
+    Write-Host 'Portable PE verifier self-tests passed.'
+    return
 }
 
 $portableDirectory = Get-PortableDirectory $DistDirectory

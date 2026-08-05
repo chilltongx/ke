@@ -5,22 +5,27 @@ on:
     tags:
       - "windows-v*"
 
-permissions:
-  contents: write
-
 jobs:
-  release:
+  build:
+    permissions:
+      contents: read
     runs-on: windows-latest
     timeout-minutes: 30
 
     steps:
       - name: Check out source
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.302
+
+      - name: Run portable verifier self-tests
+        shell: pwsh
+        run: ./windows/scripts/verify-portable.ps1 -SelfTest
 
       - name: Build portable package
         shell: pwsh
@@ -30,15 +35,73 @@ jobs:
         shell: pwsh
         run: ./windows/scripts/verify-portable.ps1 -DistDirectory './windows/dist/可-windows-x64'
 
+      - name: Stage release assets
+        shell: pwsh
+        run: |
+          $assetDirectory = Join-Path $env:RUNNER_TEMP 'ke-windows-release-assets'
+          [IO.Directory]::CreateDirectory($assetDirectory) | Out-Null
+          Copy-Item -LiteralPath './windows/dist/可-windows-x64.zip' `
+            -Destination (Join-Path $assetDirectory '可-windows-x64.zip')
+          Copy-Item -LiteralPath './windows/dist/可-windows-x64/SHA256SUMS.txt' `
+            -Destination (Join-Path $assetDirectory 'SHA256SUMS.txt')
+          Copy-Item -LiteralPath './windows/RELEASE_NOTES.md' `
+            -Destination (Join-Path $assetDirectory 'RELEASE_NOTES.md')
+
+      - name: Upload verified release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: ke-windows-release-assets
+          path: ${{ runner.temp }}/ke-windows-release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Download verified release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: ke-windows-release-assets
+          path: ${{ runner.temp }}/ke-windows-release-assets
+
+      - name: Validate downloaded inventory
+        shell: pwsh
+        run: |
+          $assetDirectory = Join-Path $env:RUNNER_TEMP 'ke-windows-release-assets'
+          $expected = @('RELEASE_NOTES.md', 'SHA256SUMS.txt', '可-windows-x64.zip')
+          $entries = @(Get-ChildItem -LiteralPath $assetDirectory -Force)
+          $actual = @($entries | ForEach-Object { $_.Name } | Sort-Object)
+          if (Compare-Object ($expected | Sort-Object) $actual) {
+            throw 'Downloaded release asset inventory mismatch'
+          }
+          if (($entries | Where-Object { $_.PSIsContainer }).Count -ne 0) {
+            throw 'Downloaded release assets must contain files only'
+          }
+          if (($entries | Where-Object { $_.Length -le 0 }).Count -ne 0) {
+            throw 'Downloaded release assets must be nonempty'
+          }
+
       - name: Create GitHub pre-release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create '${{ github.ref_name }}' `
+          $tag = $env:RELEASE_TAG
+          if ([string]::IsNullOrWhiteSpace($tag) -or $tag.Length -gt 64 -or
+              $tag -notmatch '^windows-v[0-9A-Za-z][0-9A-Za-z._-]{0,54}$') {
+            throw 'Release tag is invalid'
+          }
+          $assetDirectory = Join-Path $env:RUNNER_TEMP 'ke-windows-release-assets'
+          gh release create $tag `
             --verify-tag `
             --prerelease `
-            --title '可 Windows 测试版 ${{ github.ref_name }}' `
-            --notes-file './windows/RELEASE_NOTES.md' `
-            './windows/dist/可-windows-x64.zip' `
-            './windows/dist/可-windows-x64/SHA256SUMS.txt'
+            --title "可 Windows 测试版 $tag" `
+            --notes-file (Join-Path $assetDirectory 'RELEASE_NOTES.md') `
+            (Join-Path $assetDirectory '可-windows-x64.zip') `
+            (Join-Path $assetDirectory 'SHA256SUMS.txt')
