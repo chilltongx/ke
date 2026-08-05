@@ -213,12 +213,18 @@ internal static class HarnessProcessTeardown
 
     internal static async Task<HarnessTeardownResult> CloseExactAsync(
         Process process,
-        TimeSpan closeTimeout)
+        TimeSpan closeTimeout) =>
+        await CloseExactAsync(process, closeTimeout, descendantConfirmed: null)
+            .ConfigureAwait(false);
+
+    internal static async Task<HarnessTeardownResult> CloseExactAsync(
+        Process process,
+        TimeSpan closeTimeout,
+        Action<uint>? descendantConfirmed)
     {
         ArgumentNullException.ThrowIfNull(process);
-        var processId = checked((uint)process.Id);
         var forced = false;
-        using var descendants = new ExactDescendantTracker(processId);
+        using var descendants = new ExactDescendantTracker(process, descendantConfirmed);
         descendants.Discover();
 
         if (!process.HasExited)
@@ -232,10 +238,12 @@ internal static class HarnessProcessTeardown
                 forced = true;
                 descendants.Discover();
                 process.Kill(entireProcessTree: true);
+                descendants.KillRemainingExact();
                 _ = await WaitForExactTreeExitAsync(
                     process,
                     descendants,
-                    ForcedExitTimeout).ConfigureAwait(false);
+                    ForcedExitTimeout,
+                    terminateDescendants: true).ConfigureAwait(false);
             }
         }
 
@@ -249,11 +257,17 @@ internal static class HarnessProcessTeardown
     private static async Task<bool> WaitForExactTreeExitAsync(
         Process root,
         ExactDescendantTracker descendants,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        bool terminateDescendants = false)
     {
         if (timeout <= TimeSpan.Zero)
         {
             descendants.Discover();
+            if (terminateDescendants)
+            {
+                descendants.KillRemainingExact();
+            }
+
             return root.HasExited && descendants.GetRemainingProcessIds().Count == 0;
         }
 
@@ -262,6 +276,11 @@ internal static class HarnessProcessTeardown
         while (stopwatch.Elapsed < timeout)
         {
             descendants.Discover();
+            if (terminateDescendants)
+            {
+                descendants.KillRemainingExact();
+            }
+
             if (root.HasExited && descendants.GetRemainingProcessIds().Count == 0)
             {
                 quiescentSamples++;
@@ -287,15 +306,30 @@ internal static class HarnessProcessTeardown
         }
 
         descendants.Discover();
+        if (terminateDescendants)
+        {
+            descendants.KillRemainingExact();
+        }
+
         return root.HasExited && descendants.GetRemainingProcessIds().Count == 0;
     }
 }
 
-internal sealed class ExactDescendantTracker(uint rootProcessId) : IDisposable
+internal sealed class ExactDescendantTracker : IDisposable
 {
-    private readonly Dictionary<uint, Process> _processes = [];
-    private readonly HashSet<uint> _unresolvedProcessIds = [];
+    private readonly Dictionary<uint, List<TrackedProcessIdentity>> _identities = [];
+    private readonly Dictionary<uint, uint> _unresolvedProcessIds = [];
+    private readonly Action<uint>? _descendantConfirmed;
     private int _disposed;
+
+    internal ExactDescendantTracker(
+        Process root,
+        Action<uint>? descendantConfirmed = null)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+        _descendantConfirmed = descendantConfirmed;
+        AddIdentity(TrackedProcessIdentity.BorrowRoot(root));
+    }
 
     internal void Discover()
     {
@@ -305,53 +339,46 @@ internal sealed class ExactDescendantTracker(uint rootProcessId) : IDisposable
             return;
         }
 
-        var current = ProcessTreeInspector.FindDescendants(rootProcessId).ToHashSet();
-        _unresolvedProcessIds.RemoveWhere(processId => !current.Contains(processId));
-        foreach (var processId in current)
+        var firstSnapshot = ProcessTreeInspector.Capture();
+        foreach (var processId in _unresolvedProcessIds.Keys.ToArray())
         {
-            if (_processes.TryGetValue(processId, out var tracked))
+            if (!firstSnapshot.Contains(processId))
             {
-                if (!HasExited(tracked))
-                {
-                    continue;
-                }
-
-                tracked.Dispose();
-                _processes.Remove(processId);
+                _unresolvedProcessIds.Remove(processId);
             }
+        }
 
-            if (_unresolvedProcessIds.Contains(processId))
+        var confirmedParentIds = _identities.Keys.ToHashSet();
+        foreach (var candidate in firstSnapshot.FindDescendantsFrom(confirmedParentIds))
+        {
+            var confirmation = ConfirmCandidate(candidate);
+            if (confirmation == CandidateConfirmation.Unresolved)
             {
-                continue;
+                _unresolvedProcessIds[candidate.ProcessId] = candidate.ParentProcessId;
             }
+            else if (confirmation != CandidateConfirmation.AlreadyConfirmed)
+            {
+                _unresolvedProcessIds.Remove(candidate.ProcessId);
+            }
+        }
+    }
 
-            Process? candidate = null;
+    internal void KillRemainingExact()
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        foreach (var identity in DescendantIdentities().Where(identity => !identity.HasExited))
+        {
             try
             {
-                candidate = Process.GetProcessById(checked((int)processId));
-                _ = candidate.StartTime;
-                _ = candidate.Handle;
-                if (!candidate.HasExited)
-                {
-                    _processes.Add(processId, candidate);
-                    candidate = null;
-                }
-            }
-            catch (ArgumentException)
-            {
-                // The exact PID exited between Toolhelp discovery and handle acquisition.
+                identity.Process.Kill(entireProcessTree: true);
             }
             catch (InvalidOperationException)
             {
-                // The exact PID exited while its stable process handle was opened.
+                // The stable process identity exited before exact termination.
             }
             catch (Win32Exception)
             {
-                _unresolvedProcessIds.Add(processId);
-            }
-            finally
-            {
-                candidate?.Dispose();
+                _unresolvedProcessIds[identity.ProcessId] = identity.ParentProcessId;
             }
         }
     }
@@ -359,14 +386,13 @@ internal sealed class ExactDescendantTracker(uint rootProcessId) : IDisposable
     internal IReadOnlyList<uint> GetRemainingProcessIds()
     {
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
-        var remaining = _processes
-            .Where(pair => !HasExited(pair.Value))
-            .Select(pair => pair.Key)
-            .Concat(_unresolvedProcessIds)
+        return DescendantIdentities()
+            .Where(identity => !identity.HasExited)
+            .Select(identity => identity.ProcessId)
+            .Concat(_unresolvedProcessIds.Keys)
             .Distinct()
             .Order()
             .ToArray();
-        return remaining;
     }
 
     public void Dispose()
@@ -376,24 +402,202 @@ internal sealed class ExactDescendantTracker(uint rootProcessId) : IDisposable
             return;
         }
 
-        foreach (var process in _processes.Values)
+        foreach (var identity in _identities.Values.SelectMany(value => value))
         {
-            process.Dispose();
+            identity.Dispose();
         }
 
-        _processes.Clear();
+        _identities.Clear();
         _unresolvedProcessIds.Clear();
     }
 
-    private static bool HasExited(Process process)
+    private CandidateConfirmation ConfirmCandidate(ProcessTreeEntry candidateEntry)
     {
+        Process? candidate = null;
+        Process? verification = null;
         try
         {
-            return process.HasExited;
+            candidate = Process.GetProcessById(checked((int)candidateEntry.ProcessId));
+            _ = candidate.Handle;
+            var candidateStartTime = candidate.StartTime.ToUniversalTime();
+
+            if (HasIdentity(candidateEntry.ProcessId, candidateStartTime))
+            {
+                return CandidateConfirmation.AlreadyConfirmed;
+            }
+
+            var secondSnapshot = ProcessTreeInspector.Capture();
+            if (!secondSnapshot.TryGetParent(
+                    candidateEntry.ProcessId,
+                    out var secondParentProcessId) ||
+                secondParentProcessId != candidateEntry.ParentProcessId)
+            {
+                return CandidateConfirmation.Changed;
+            }
+
+            verification = Process.GetProcessById(checked((int)candidateEntry.ProcessId));
+            _ = verification.Handle;
+            if (verification.StartTime.ToUniversalTime() != candidateStartTime)
+            {
+                return CandidateConfirmation.Changed;
+            }
+
+            var parent = FindExactParent(
+                candidateEntry.ParentProcessId,
+                candidateStartTime);
+            if (parent is null)
+            {
+                return CandidateConfirmation.Unrelated;
+            }
+
+            AddIdentity(new TrackedProcessIdentity(
+                candidate,
+                candidateEntry.ProcessId,
+                candidateEntry.ParentProcessId,
+                candidateStartTime,
+                ownsProcess: true));
+            candidate = null;
+            _descendantConfirmed?.Invoke(candidateEntry.ProcessId);
+            return CandidateConfirmation.Confirmed;
+        }
+        catch (ArgumentException)
+        {
+            return CandidateConfirmation.Changed;
         }
         catch (InvalidOperationException)
         {
+            return CandidateConfirmation.Changed;
+        }
+        catch (Win32Exception)
+        {
+            return CandidateConfirmation.Unresolved;
+        }
+        finally
+        {
+            verification?.Dispose();
+            candidate?.Dispose();
+        }
+    }
+
+    private TrackedProcessIdentity? FindExactParent(
+        uint parentProcessId,
+        DateTime childStartTimeUtc)
+    {
+        if (!_identities.TryGetValue(parentProcessId, out var identities))
+        {
+            return null;
+        }
+
+        return identities
+            .Where(identity => identity.CouldHaveCreated(childStartTimeUtc))
+            .OrderByDescending(identity => identity.StartTimeUtc)
+            .FirstOrDefault();
+    }
+
+    private bool HasIdentity(uint processId, DateTime startTimeUtc) =>
+        _identities.TryGetValue(processId, out var identities) &&
+        identities.Any(identity => identity.StartTimeUtc == startTimeUtc);
+
+    private void AddIdentity(TrackedProcessIdentity identity)
+    {
+        if (!_identities.TryGetValue(identity.ProcessId, out var identities))
+        {
+            identities = [];
+            _identities.Add(identity.ProcessId, identities);
+        }
+
+        identities.Add(identity);
+    }
+
+    private IEnumerable<TrackedProcessIdentity> DescendantIdentities() =>
+        _identities.Values
+            .SelectMany(identities => identities)
+            .Where(identity => identity.OwnsProcess);
+
+    private enum CandidateConfirmation
+    {
+        Confirmed,
+        AlreadyConfirmed,
+        Changed,
+        Unrelated,
+        Unresolved
+    }
+}
+
+internal sealed class TrackedProcessIdentity(
+    Process process,
+    uint processId,
+    uint parentProcessId,
+    DateTime startTimeUtc,
+    bool ownsProcess) : IDisposable
+{
+    internal Process Process { get; } = process;
+
+    internal uint ProcessId { get; } = processId;
+
+    internal uint ParentProcessId { get; } = parentProcessId;
+
+    internal DateTime StartTimeUtc { get; } = startTimeUtc;
+
+    internal bool OwnsProcess { get; } = ownsProcess;
+
+    internal bool HasExited
+    {
+        get
+        {
+            try
+            {
+                return Process.HasExited;
+            }
+            catch (InvalidOperationException)
+            {
+                return true;
+            }
+        }
+    }
+
+    internal static TrackedProcessIdentity BorrowRoot(Process root)
+    {
+        _ = root.Handle;
+        return new(
+            root,
+            checked((uint)root.Id),
+            0,
+            root.StartTime.ToUniversalTime(),
+            ownsProcess: false);
+    }
+
+    internal bool CouldHaveCreated(DateTime childStartTimeUtc)
+    {
+        if (childStartTimeUtc < StartTimeUtc)
+        {
+            return false;
+        }
+
+        if (!HasExited)
+        {
             return true;
+        }
+
+        try
+        {
+            return childStartTimeUtc <= Process.ExitTime.ToUniversalTime();
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch (Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (OwnsProcess)
+        {
+            Process.Dispose();
         }
     }
 }
@@ -657,7 +861,7 @@ internal static class ProcessTreeInspector
     private const uint SnapshotProcesses = 0x00000002;
     private static readonly nint InvalidHandleValue = new(-1);
 
-    internal static IReadOnlyList<uint> FindDescendants(uint rootProcessId)
+    internal static ProcessTreeSnapshot Capture()
     {
         var snapshot = CreateToolhelp32Snapshot(SnapshotProcesses, 0);
         if (snapshot == InvalidHandleValue)
@@ -667,7 +871,7 @@ internal static class ProcessTreeInspector
 
         try
         {
-            var entries = new List<(uint ProcessId, uint ParentProcessId)>();
+            var entries = new List<ProcessTreeEntry>();
             var entry = new ProcessEntry32
             {
                 Size = checked((uint)Marshal.SizeOf<ProcessEntry32>())
@@ -676,28 +880,13 @@ internal static class ProcessTreeInspector
             {
                 do
                 {
-                    entries.Add((entry.ProcessId, entry.ParentProcessId));
+                    entries.Add(new(entry.ProcessId, entry.ParentProcessId));
                     entry.Size = checked((uint)Marshal.SizeOf<ProcessEntry32>());
                 }
                 while (Process32Next(snapshot, ref entry));
             }
 
-            var descendants = new HashSet<uint>();
-            var frontier = new Queue<uint>();
-            frontier.Enqueue(rootProcessId);
-            while (frontier.Count != 0)
-            {
-                var parent = frontier.Dequeue();
-                foreach (var child in entries.Where(item => item.ParentProcessId == parent))
-                {
-                    if (descendants.Add(child.ProcessId))
-                    {
-                        frontier.Enqueue(child.ProcessId);
-                    }
-                }
-            }
-
-            return descendants.Order().ToArray();
+            return new ProcessTreeSnapshot(entries);
         }
         finally
         {
@@ -736,4 +925,68 @@ internal static class ProcessTreeInspector
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(nint handle);
+}
+
+internal sealed record ProcessTreeEntry(uint ProcessId, uint ParentProcessId);
+
+internal sealed class ProcessTreeSnapshot
+{
+    private readonly IReadOnlyDictionary<uint, ProcessTreeEntry> _byProcessId;
+    private readonly IReadOnlyDictionary<uint, IReadOnlyList<ProcessTreeEntry>> _byParentProcessId;
+
+    internal ProcessTreeSnapshot(IEnumerable<ProcessTreeEntry> entries)
+    {
+        var materialized = entries
+            .Where(entry => entry.ProcessId != 0)
+            .GroupBy(entry => entry.ProcessId)
+            .Select(group => group.Last())
+            .ToArray();
+        _byProcessId = materialized.ToDictionary(entry => entry.ProcessId);
+        _byParentProcessId = materialized
+            .GroupBy(entry => entry.ParentProcessId)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<ProcessTreeEntry>)group.ToArray());
+    }
+
+    internal bool Contains(uint processId) => _byProcessId.ContainsKey(processId);
+
+    internal bool TryGetParent(uint processId, out uint parentProcessId)
+    {
+        if (_byProcessId.TryGetValue(processId, out var entry))
+        {
+            parentProcessId = entry.ParentProcessId;
+            return true;
+        }
+
+        parentProcessId = 0;
+        return false;
+    }
+
+    internal IReadOnlyList<ProcessTreeEntry> FindDescendantsFrom(
+        IReadOnlySet<uint> confirmedParentProcessIds)
+    {
+        var descendants = new List<ProcessTreeEntry>();
+        var visited = new HashSet<uint>(confirmedParentProcessIds);
+        var frontier = new Queue<uint>(confirmedParentProcessIds);
+        while (frontier.Count != 0)
+        {
+            var parentProcessId = frontier.Dequeue();
+            if (!_byParentProcessId.TryGetValue(parentProcessId, out var children))
+            {
+                continue;
+            }
+
+            foreach (var child in children)
+            {
+                if (visited.Add(child.ProcessId))
+                {
+                    descendants.Add(child);
+                    frontier.Enqueue(child.ProcessId);
+                }
+            }
+        }
+
+        return descendants;
+    }
 }

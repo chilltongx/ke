@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Xml.Linq;
 using Ke.Windows.Automation;
 using Ke.Windows.Core;
@@ -117,6 +118,59 @@ public sealed class IntegrationHarnessTests
     }
 
     [Fact]
+    public async Task Teardown_cleans_orphaned_grandchild_without_killing_ping_sentinel()
+    {
+        var fixtureDirectory = Directory.CreateDirectory(Path.Combine(
+            Path.GetTempPath(),
+            $"Ke.Windows.ProcessTree.{Guid.NewGuid():N}"));
+        var childPidPath = Path.Combine(fixtureDirectory.FullName, "child.pid");
+        var grandchildPidPath = Path.Combine(fixtureDirectory.FullName, "grandchild.pid");
+        var releasePath = Path.Combine(fixtureDirectory.FullName, "release");
+        using var sentinel = StartPing();
+        using var root = StartOrphanedGrandchildFixture(
+            childPidPath,
+            grandchildPidPath,
+            releasePath);
+        Process? grandchild = null;
+        try
+        {
+            var childProcessId = await WaitForProcessIdAsync(childPidPath);
+            var released = 0;
+            var teardown = HarnessProcessTeardown.CloseExactAsync(
+                root,
+                TimeSpan.FromSeconds(1),
+                confirmedProcessId =>
+                {
+                    if (confirmedProcessId == childProcessId &&
+                        Interlocked.Exchange(ref released, 1) == 0)
+                    {
+                        File.WriteAllText(releasePath, "release");
+                    }
+                });
+
+            var grandchildProcessId = await WaitForProcessIdAsync(grandchildPidPath);
+            grandchild = Process.GetProcessById(checked((int)grandchildProcessId));
+            _ = grandchild.Handle;
+            var result = await teardown;
+
+            Assert.Equal(1, Volatile.Read(ref released));
+            Assert.True(result.Forced);
+            Assert.True(result.Exited);
+            Assert.Empty(result.RemainingDescendantProcessIds);
+            Assert.True(grandchild.HasExited);
+            Assert.False(sentinel.HasExited);
+        }
+        finally
+        {
+            KillExactIfRunning(grandchild);
+            grandchild?.Dispose();
+            KillExactIfRunning(root);
+            KillExactIfRunning(sentinel);
+            fixtureDirectory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public void Harness_project_has_no_production_project_references()
     {
         var project = XDocument.Load(HarnessPaths.ProjectFile);
@@ -129,6 +183,90 @@ public sealed class IntegrationHarnessTests
     {
         await HarnessInteractiveScenario.RunAsync();
     }
+
+    private static Process StartPing() =>
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = "ping.exe",
+            Arguments = "127.0.0.1 -n 30",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        }) ?? throw new InvalidOperationException("Failed to start ping fixture.");
+
+    private static Process StartOrphanedGrandchildFixture(
+        string childPidPath,
+        string grandchildPidPath,
+        string releasePath)
+    {
+        var childScript = string.Join(
+            ';',
+            $"[IO.File]::WriteAllText('{EscapePowerShell(childPidPath)}',[string]$PID)",
+            $"while(-not (Test-Path -LiteralPath '{EscapePowerShell(releasePath)}'))" +
+            "{Start-Sleep -Milliseconds 10}",
+            "$p=Start-Process -FilePath 'ping.exe' " +
+            "-ArgumentList @('127.0.0.1','-n','30') -WindowStyle Hidden -PassThru",
+            $"[IO.File]::WriteAllText('{EscapePowerShell(grandchildPidPath)}',[string]$p.Id)");
+        var childEncoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(childScript));
+        var rootScript =
+            "$null=Start-Process -FilePath 'powershell.exe' " +
+            "-ArgumentList @('-NoLogo','-NoProfile','-NonInteractive'," +
+            $"'-EncodedCommand','{childEncoded}') -WindowStyle Hidden;" +
+            "while($true){Start-Sleep -Milliseconds 100}";
+        var rootEncoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(rootScript));
+        var start = new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        start.ArgumentList.Add("-NoLogo");
+        start.ArgumentList.Add("-NoProfile");
+        start.ArgumentList.Add("-NonInteractive");
+        start.ArgumentList.Add("-EncodedCommand");
+        start.ArgumentList.Add(rootEncoded);
+        return Process.Start(start)
+            ?? throw new InvalidOperationException("Failed to start process-tree fixture.");
+    }
+
+    private static async Task<uint> WaitForProcessIdAsync(string path)
+    {
+        uint processId = 0;
+        var ready = await HarnessReadiness.WaitAsync(
+            () =>
+            {
+                try
+                {
+                    return uint.TryParse(File.ReadAllText(path), out processId) &&
+                        processId != 0;
+                }
+                catch (IOException)
+                {
+                    return false;
+                }
+            },
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromMilliseconds(20));
+        return ready
+            ? processId
+            : throw new InvalidOperationException("Timed out waiting for a fixture process ID.");
+    }
+
+    private static void KillExactIfRunning(Process? process)
+    {
+        if (process is null || process.HasExited)
+        {
+            return;
+        }
+
+        process.Kill(entireProcessTree: true);
+        Assert.True(process.WaitForExit(5000), $"Fixture PID {process.Id} did not exit.");
+    }
+
+    private static string EscapePowerShell(string value) => value.Replace("'", "''");
 }
 
 internal sealed class InteractiveWindowsFactAttribute : FactAttribute
