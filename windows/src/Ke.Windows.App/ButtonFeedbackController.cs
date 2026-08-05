@@ -170,6 +170,7 @@ public sealed class WpfButtonFeedbackView : IButtonFeedbackView
     private static readonly Color Charcoal = Color.FromRgb(0x1E, 0x1E, 0x1F);
     private static readonly Color Mint = Color.FromRgb(0x55, 0xD6, 0xBE);
     private static readonly Color Ivory = Color.FromRgb(0xFF, 0xF8, 0xE7);
+    private static readonly Color GlyphLight = Color.FromRgb(0xF6, 0xF7, 0xF8);
     private static readonly Color FailureRed = Color.FromRgb(0xFF, 0x5A, 0x5F);
     private static readonly Duration TransitionDuration =
         new(TimeSpan.FromMilliseconds(100));
@@ -180,7 +181,7 @@ public sealed class WpfButtonFeedbackView : IButtonFeedbackView
     private readonly Action<string> _publishAccessibility;
     private readonly SolidColorBrush _background = new(Charcoal);
     private readonly SolidColorBrush _border = new(Mint);
-    private readonly SolidColorBrush _foreground = new(Ivory);
+    private readonly SolidColorBrush _foreground = new(GlyphLight);
     private readonly ScaleTransform _scale = new(1, 1);
 
     public WpfButtonFeedbackView(
@@ -208,8 +209,8 @@ public sealed class WpfButtonFeedbackView : IButtonFeedbackView
         var colors = visual switch
         {
             ButtonFeedbackVisual.Success => (Mint, Ivory, Charcoal),
-            ButtonFeedbackVisual.Failure => (Charcoal, FailureRed, Ivory),
-            _ => (Charcoal, Mint, Ivory)
+            ButtonFeedbackVisual.Failure => (Charcoal, FailureRed, GlyphLight),
+            _ => (Charcoal, Mint, GlyphLight)
         };
 
         ApplyColor(_background, colors.Item1, animate);

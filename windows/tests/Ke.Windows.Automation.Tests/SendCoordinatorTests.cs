@@ -18,6 +18,7 @@ public sealed class SendCoordinatorTests
         var reported = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
         using var coordinator = Create(sender, deadline);
+        var attempt = sender.PrepareAttempt();
 
         var running = coordinator.TryStartAsync(
             result =>
@@ -26,7 +27,7 @@ public sealed class SendCoordinatorTests
                 reported.TrySetResult();
                 return Task.CompletedTask;
             });
-        await sender.Entered;
+        await attempt.Entered;
         deadline.Expire();
         await reported.Task;
 
@@ -34,13 +35,15 @@ public sealed class SendCoordinatorTests
         Assert.Equal(SendErrorCode.AutomationTimeout, timeout.Error);
         Assert.False(await coordinator.TryStartAsync(_ => Task.CompletedTask));
 
-        sender.Return(SendResult.Success());
+        attempt.Return(SendResult.Success());
         Assert.True(await running);
         Assert.Single(reports);
         Assert.Equal(ExpectedDeadline, deadline.RequestedDuration);
 
+        var nextAttempt = sender.PrepareAttempt();
         var next = coordinator.TryStartAsync(_ => Task.CompletedTask);
-        sender.Return(SendResult.Success());
+        await nextAttempt.Entered;
+        nextAttempt.Return(SendResult.Success());
         Assert.True(await next);
     }
 
@@ -52,6 +55,7 @@ public sealed class SendCoordinatorTests
         var ui = new RecordingUiDispatcher();
         var reports = new List<SendResult>();
         using var coordinator = Create(sender, deadline, ui);
+        var attempt = sender.PrepareAttempt();
 
         var running = coordinator.TryStartAsync(
             result =>
@@ -60,8 +64,8 @@ public sealed class SendCoordinatorTests
                 Assert.True(ui.IsDispatching);
                 return Task.CompletedTask;
             });
-        await sender.Entered;
-        sender.Return(SendResult.Failure(SendErrorCode.DraftPresent));
+        await attempt.Entered;
+        attempt.Return(SendResult.Failure(SendErrorCode.DraftPresent));
 
         Assert.True(await running);
         Assert.Equal(SendErrorCode.DraftPresent, Assert.Single(reports).Error);
@@ -76,6 +80,7 @@ public sealed class SendCoordinatorTests
         var deadline = new ManualDeadline();
         var reports = 0;
         using var coordinator = Create(sender, deadline);
+        var attempt = sender.PrepareAttempt();
 
         var first = coordinator.TryStartAsync(
             _ =>
@@ -83,7 +88,7 @@ public sealed class SendCoordinatorTests
                 reports++;
                 return Task.CompletedTask;
             });
-        await sender.Entered;
+        await attempt.Entered;
 
         Assert.False(await coordinator.TryStartAsync(
             _ =>
@@ -93,7 +98,7 @@ public sealed class SendCoordinatorTests
             }));
         Assert.Equal(1, sender.Attempts);
 
-        sender.Return(SendResult.Success());
+        attempt.Return(SendResult.Success());
         Assert.True(await first);
         Assert.Equal(1, reports);
     }
@@ -105,6 +110,7 @@ public sealed class SendCoordinatorTests
         var deadline = new ManualDeadline();
         var reports = new List<SendResult>();
         using var coordinator = Create(sender, deadline);
+        var attempt = sender.PrepareAttempt();
 
         var running = coordinator.TryStartAsync(
             result =>
@@ -112,8 +118,8 @@ public sealed class SendCoordinatorTests
                 reports.Add(result);
                 return Task.CompletedTask;
             });
-        await sender.Entered;
-        sender.Throw(new InvalidOperationException("boom"));
+        await attempt.Entered;
+        attempt.Throw(new InvalidOperationException("boom"));
 
         Assert.True(await running);
         Assert.Equal(SendErrorCode.AutomationUnavailable, Assert.Single(reports).Error);
@@ -126,6 +132,7 @@ public sealed class SendCoordinatorTests
         var deadline = new ManualDeadline();
         var callbacks = 0;
         using var coordinator = Create(sender, deadline);
+        var firstAttempt = sender.PrepareAttempt();
 
         var first = coordinator.TryStartAsync(
             _ =>
@@ -133,14 +140,16 @@ public sealed class SendCoordinatorTests
                 callbacks++;
                 throw new InvalidOperationException("ui failed");
             });
-        await sender.Entered;
-        sender.Return(SendResult.Success());
+        await firstAttempt.Entered;
+        firstAttempt.Return(SendResult.Success());
 
         Assert.True(await first);
         Assert.Equal(1, callbacks);
 
+        var secondAttempt = sender.PrepareAttempt();
         var second = coordinator.TryStartAsync(_ => Task.CompletedTask);
-        sender.Return(SendResult.Success());
+        await secondAttempt.Entered;
+        secondAttempt.Return(SendResult.Success());
         Assert.True(await second);
     }
 
@@ -151,6 +160,7 @@ public sealed class SendCoordinatorTests
         var deadline = new ManualDeadline();
         var reports = 0;
         var coordinator = Create(sender, deadline);
+        var attempt = sender.PrepareAttempt();
 
         var running = coordinator.TryStartAsync(
             _ =>
@@ -158,71 +168,165 @@ public sealed class SendCoordinatorTests
                 reports++;
                 return Task.CompletedTask;
             });
-        await sender.Entered;
+        await attempt.Entered;
 
         coordinator.Dispose();
 
-        Assert.True(sender.CancellationRequested);
+        Assert.True(attempt.CancellationRequested);
         Assert.False(await coordinator.TryStartAsync(_ => Task.CompletedTask));
-        sender.Return(SendResult.Success());
+        attempt.Return(SendResult.Success());
         Assert.True(await running);
         Assert.Equal(0, reports);
+    }
+
+    [Fact]
+    public async Task Repeated_attempts_use_distinct_entry_and_completion_handshakes()
+    {
+        const int repetitions = 100;
+        var sender = new ControlledSender();
+        var deadline = new ManualDeadline();
+        using var coordinator = Create(sender, deadline);
+
+        for (var index = 1; index <= repetitions; index++)
+        {
+            var attempt = sender.PrepareAttempt();
+            var running = coordinator.TryStartAsync(_ => Task.CompletedTask);
+
+            await attempt.Entered;
+            Assert.Equal(index, attempt.Sequence);
+            attempt.Return(SendResult.Success());
+
+            Assert.True(await running);
+        }
+
+        Assert.Equal(repetitions, sender.Attempts);
+    }
+
+    [Fact]
+    public async Task Deadline_winner_stays_timeout_when_worker_completes_before_continuation()
+    {
+        var sender = new ControlledSender();
+        var deadline = new ManualDeadline();
+        var race = new ManualCompletionRace();
+        var reports = new List<SendResult>();
+        using var coordinator = Create(sender, deadline, race: race);
+        var attempt = sender.PrepareAttempt();
+
+        var running = coordinator.TryStartAsync(
+            result =>
+            {
+                reports.Add(result);
+                return Task.CompletedTask;
+            });
+        await attempt.Entered;
+        await race.Registered;
+
+        deadline.Expire();
+        await race.DeadlineCompleted;
+        race.Decide(SendCompletion.Deadline);
+        attempt.Return(SendResult.Success());
+        await race.WorkerCompleted;
+        race.Release();
+
+        Assert.True(await running);
+        Assert.Equal(SendErrorCode.AutomationTimeout, Assert.Single(reports).Error);
     }
 
     private static SendCoordinator Create(
         ControlledSender sender,
         ManualDeadline deadline,
-        RecordingUiDispatcher? ui = null) =>
-        new(new ThreadPoolAutomationDispatcher(), sender, deadline, ui ?? new());
+        RecordingUiDispatcher? ui = null,
+        ISendCompletionRace? race = null) =>
+        new(
+            new ThreadPoolAutomationDispatcher(),
+            sender,
+            deadline,
+            ui ?? new(),
+            race ?? new TaskSendCompletionRace());
 
     private sealed class ControlledSender : IFocusedChatSender
     {
         private readonly object _gate = new();
-        private TaskCompletionSource<SendResult> _result = NewCompletion();
-        private readonly TaskCompletionSource _entered =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private CancellationToken _token;
+        private readonly Queue<ControlledAttempt> _prepared = new();
+        private int _attempts;
+        private int _sequence;
 
-        public int Attempts { get; private set; }
+        public int Attempts => Volatile.Read(ref _attempts);
 
-        public Task Entered => _entered.Task;
-
-        public bool CancellationRequested => _token.IsCancellationRequested;
+        public ControlledAttempt PrepareAttempt()
+        {
+            lock (_gate)
+            {
+                var attempt = new ControlledAttempt(++_sequence);
+                _prepared.Enqueue(attempt);
+                return attempt;
+            }
+        }
 
         public SendResult TrySend(CancellationToken cancellationToken)
         {
-            Task<SendResult> task;
+            ControlledAttempt attempt;
             lock (_gate)
             {
-                Attempts++;
-                _token = cancellationToken;
-                task = _result.Task;
-                _entered.TrySetResult();
+                attempt = _prepared.Count > 0
+                    ? _prepared.Dequeue()
+                    : throw new InvalidOperationException(
+                        "Each worker attempt must be prepared before dispatch.");
             }
 
-            return task.GetAwaiter().GetResult();
+            Interlocked.Increment(ref _attempts);
+            return attempt.Run(cancellationToken);
         }
 
-        public void Return(SendResult result)
+        public sealed class ControlledAttempt
         {
-            lock (_gate)
+            private readonly TaskCompletionSource _entered =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
+            private readonly TaskCompletionSource<SendResult> _result =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
+            private CancellationToken _token;
+            private int _hasEntered;
+
+            public ControlledAttempt(int sequence)
             {
+                Sequence = sequence;
+            }
+
+            public int Sequence { get; }
+
+            public Task Entered => _entered.Task;
+
+            public bool CancellationRequested => _token.IsCancellationRequested;
+
+            public void Return(SendResult result)
+            {
+                EnsureEntered();
                 _result.TrySetResult(result);
-                _result = NewCompletion();
             }
-        }
 
-        public void Throw(Exception exception)
-        {
-            lock (_gate)
+            public void Throw(Exception exception)
             {
+                EnsureEntered();
                 _result.TrySetException(exception);
-                _result = NewCompletion();
+            }
+
+            internal SendResult Run(CancellationToken cancellationToken)
+            {
+                _token = cancellationToken;
+                Volatile.Write(ref _hasEntered, 1);
+                _entered.TrySetResult();
+                return _result.Task.GetAwaiter().GetResult();
+            }
+
+            private void EnsureEntered()
+            {
+                if (Volatile.Read(ref _hasEntered) == 0)
+                {
+                    throw new InvalidOperationException(
+                        "An attempt cannot complete before its worker enters.");
+                }
             }
         }
-
-        private static TaskCompletionSource<SendResult> NewCompletion() =>
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     private sealed class ThreadPoolAutomationDispatcher : IAutomationDispatcher
@@ -283,5 +387,39 @@ public sealed class SendCoordinatorTests
                 _dispatching.Value = false;
             }
         }
+    }
+
+    private sealed class ManualCompletionRace : ISendCompletionRace
+    {
+        private readonly TaskCompletionSource _registered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _released =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private Task<SendResult>? _worker;
+        private Task? _deadline;
+        private SendCompletion? _decision;
+
+        public Task Registered => _registered.Task;
+
+        public Task WorkerCompleted =>
+            _worker ?? throw new InvalidOperationException("Race is not registered.");
+
+        public Task DeadlineCompleted =>
+            _deadline ?? throw new InvalidOperationException("Race is not registered.");
+
+        public async Task<SendCompletion> WaitAsync(
+            Task<SendResult> worker,
+            Task deadline)
+        {
+            _worker = worker;
+            _deadline = deadline;
+            _registered.TrySetResult();
+            await _released.Task;
+            return _decision ?? throw new InvalidOperationException("Race has no decision.");
+        }
+
+        public void Decide(SendCompletion decision) => _decision = decision;
+
+        public void Release() => _released.TrySetResult();
     }
 }

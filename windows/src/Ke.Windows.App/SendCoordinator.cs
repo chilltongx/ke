@@ -29,6 +29,28 @@ public sealed class WpfUiCallbackDispatcher(Dispatcher dispatcher) : IUiCallback
     }
 }
 
+public enum SendCompletion
+{
+    Worker,
+    Deadline
+}
+
+public interface ISendCompletionRace
+{
+    Task<SendCompletion> WaitAsync(Task<SendResult> worker, Task deadline);
+}
+
+public sealed class TaskSendCompletionRace : ISendCompletionRace
+{
+    public async Task<SendCompletion> WaitAsync(
+        Task<SendResult> worker,
+        Task deadline)
+    {
+        var winner = await Task.WhenAny(worker, deadline).ConfigureAwait(false);
+        return winner == worker ? SendCompletion.Worker : SendCompletion.Deadline;
+    }
+}
+
 public sealed class SendCoordinator : IDisposable
 {
     public static readonly TimeSpan SendTimeout = TimeSpan.FromSeconds(2.5);
@@ -37,6 +59,7 @@ public sealed class SendCoordinator : IDisposable
     private readonly IFocusedChatSender _sender;
     private readonly ISendDeadline _deadline;
     private readonly IUiCallbackDispatcher _uiDispatcher;
+    private readonly ISendCompletionRace _completionRace;
     private readonly CancellationTokenSource _shutdown = new();
     private int _inFlight;
     private int _disposed;
@@ -46,12 +69,29 @@ public sealed class SendCoordinator : IDisposable
         IFocusedChatSender sender,
         ISendDeadline deadline,
         IUiCallbackDispatcher uiDispatcher)
+        : this(
+            automationDispatcher,
+            sender,
+            deadline,
+            uiDispatcher,
+            new TaskSendCompletionRace())
+    {
+    }
+
+    public SendCoordinator(
+        IAutomationDispatcher automationDispatcher,
+        IFocusedChatSender sender,
+        ISendDeadline deadline,
+        IUiCallbackDispatcher uiDispatcher,
+        ISendCompletionRace completionRace)
     {
         _automationDispatcher = automationDispatcher ??
             throw new ArgumentNullException(nameof(automationDispatcher));
         _sender = sender ?? throw new ArgumentNullException(nameof(sender));
         _deadline = deadline ?? throw new ArgumentNullException(nameof(deadline));
         _uiDispatcher = uiDispatcher ?? throw new ArgumentNullException(nameof(uiDispatcher));
+        _completionRace = completionRace ??
+            throw new ArgumentNullException(nameof(completionRace));
     }
 
     public Task<bool> TryStartAsync(Func<SendResult, Task> report)
@@ -93,8 +133,10 @@ public sealed class SendCoordinator : IDisposable
         Task deadline = StartDeadline(deadlineCancellation.Token);
         try
         {
-            var completed = await Task.WhenAny(worker, deadline).ConfigureAwait(false);
-            if (completed == worker || worker.IsCompleted)
+            var completed = await _completionRace
+                .WaitAsync(worker, deadline)
+                .ConfigureAwait(false);
+            if (completed == SendCompletion.Worker)
             {
                 deadlineCancellation.Cancel();
                 var result = await ReadWorkerResultAsync(worker).ConfigureAwait(false);

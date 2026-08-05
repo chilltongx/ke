@@ -1,6 +1,8 @@
 using Ke.Windows.App;
 using Ke.Windows.Core;
+using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Media;
 using Xunit;
 
 namespace Ke.Windows.Automation.Tests;
@@ -152,6 +154,86 @@ public sealed class ButtonFeedbackControllerTests
             });
     }
 
+    [Fact]
+    public async Task Automation_peer_publishes_exact_property_and_notification_events()
+    {
+        await RunStaAsync(
+            () =>
+            {
+                var events = new RecordingAutomationEventSink();
+                var peer = new KeButtonAutomationPeer(new Border(), events);
+
+                peer.PublishResult("已发送可");
+                peer.PublishResult("输入框已有内容，未发送");
+
+                Assert.Equal(
+                    new (AutomationProperty, object?, object?)[]
+                    {
+                        (AutomationElementIdentifiers.HelpTextProperty, string.Empty, "已发送可"),
+                        (AutomationElementIdentifiers.HelpTextProperty, "已发送可", "输入框已有内容，未发送")
+                    },
+                    events.PropertyChanges);
+                Assert.All(
+                    events.Notifications,
+                    notification =>
+                    {
+                        Assert.Equal(
+                            AutomationNotificationKind.ActionCompleted,
+                            notification.Kind);
+                        Assert.Equal(
+                            AutomationNotificationProcessing.ImportantMostRecent,
+                            notification.Processing);
+                        Assert.Equal("Ke.SendResult", notification.ActivityId);
+                    });
+                Assert.Equal(
+                    new[] { "已发送可", "输入框已有内容，未发送" },
+                    events.Notifications.Select(notification => notification.Message));
+            });
+    }
+
+    [Fact]
+    public async Task Wpf_view_preserves_exact_idle_success_and_failure_palette()
+    {
+        await RunStaAsync(
+            () =>
+            {
+                var disc = new Border();
+                var glyph = new TextBlock();
+                var view = new WpfButtonFeedbackView(disc, glyph, disc, _ => { });
+
+                view.ApplyVisual(ButtonFeedbackVisual.Idle, 1, animate: false);
+                AssertPalette(disc, glyph, "#1E1E1F", "#55D6BE", "#F6F7F8");
+
+                view.ApplyVisual(ButtonFeedbackVisual.Success, 1, animate: false);
+                AssertPalette(disc, glyph, "#55D6BE", "#FFF8E7", "#1E1E1F");
+
+                view.ApplyVisual(ButtonFeedbackVisual.Failure, 1, animate: false);
+                AssertPalette(disc, glyph, "#1E1E1F", "#FF5A5F", "#F6F7F8");
+                Assert.False(((SolidColorBrush)disc.Background).HasAnimatedProperties);
+                Assert.False(((SolidColorBrush)disc.BorderBrush).HasAnimatedProperties);
+                Assert.False(((SolidColorBrush)glyph.Foreground).HasAnimatedProperties);
+                Assert.False(((ScaleTransform)disc.RenderTransform).HasAnimatedProperties);
+            });
+    }
+
+    private static void AssertPalette(
+        Border disc,
+        TextBlock glyph,
+        string background,
+        string border,
+        string foreground)
+    {
+        Assert.Equal(
+            (Color)ColorConverter.ConvertFromString(background),
+            ((SolidColorBrush)disc.Background).Color);
+        Assert.Equal(
+            (Color)ColorConverter.ConvertFromString(border),
+            ((SolidColorBrush)disc.BorderBrush).Color);
+        Assert.Equal(
+            (Color)ColorConverter.ConvertFromString(foreground),
+            ((SolidColorBrush)glyph.Foreground).Color);
+    }
+
     private static Task RunStaAsync(Action action)
     {
         var completion = new TaskCompletionSource(
@@ -200,6 +282,33 @@ public sealed class ButtonFeedbackControllerTests
 
         public void PublishAccessibility(string message) =>
             AccessibilityMessages.Add(message);
+    }
+
+    private sealed class RecordingAutomationEventSink : IKeAutomationEventSink
+    {
+        public List<(AutomationProperty Property, object? Previous, object? Current)>
+            PropertyChanges { get; } = [];
+
+        public List<Notification> Notifications { get; } = [];
+
+        public void RaisePropertyChanged(
+            AutomationProperty property,
+            object? previous,
+            object? current) =>
+            PropertyChanges.Add((property, previous, current));
+
+        public void RaiseNotification(
+            AutomationNotificationKind kind,
+            AutomationNotificationProcessing processing,
+            string message,
+            string activityId) =>
+            Notifications.Add(new(kind, processing, message, activityId));
+
+        public sealed record Notification(
+            AutomationNotificationKind Kind,
+            AutomationNotificationProcessing Processing,
+            string Message,
+            string ActivityId);
     }
 
     private sealed class ManualFeedbackDelay : IFeedbackDelay
