@@ -63,6 +63,22 @@ public sealed class WindowsInputWriterTests
 
         Assert.True(result.IsSuccess);
         Assert.Equal(TextWriteMethod.UnicodeSendInput, result.Method);
+        Assert.Equal(
+        [
+            "foreground",
+            "pid",
+            "focused",
+            "value:可",
+            "focused",
+            "foreground",
+            "pid",
+            $"modifier:{NativeMethods.VirtualKeyControl}",
+            $"modifier:{NativeMethods.VirtualKeyMenu}",
+            $"modifier:{NativeMethods.VirtualKeyShift}",
+            $"modifier:{NativeMethods.VirtualKeyLeftWindows}",
+            $"modifier:{NativeMethods.VirtualKeyRightWindows}",
+            "send-input"
+        ], fixture.Events);
         var batch = Assert.Single(fixture.Native.InputBatches);
         Assert.Collection(
             batch,
@@ -80,6 +96,45 @@ public sealed class WindowsInputWriterTests
                     NativeMethods.KeyEventUnicode | NativeMethods.KeyEventKeyUp,
                     key.Flags);
             });
+    }
+
+    [Fact]
+    public void Unicode_fallback_never_sends_when_focus_changes_after_value_attempt()
+    {
+        var fixture = WriterFixture.Create(ValueWriteAttempt.Unsupported);
+        fixture.Automation.AfterValueWrite = () =>
+            fixture.Automation.RuntimeId = "42.8";
+
+        var result = fixture.Subject.WriteApproval(Expected, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Empty(fixture.Native.InputBatches);
+    }
+
+    [Fact]
+    public void Unicode_fallback_never_sends_when_modifier_goes_down_after_value_attempt()
+    {
+        var fixture = WriterFixture.Create(ValueWriteAttempt.Unsupported);
+        fixture.Automation.AfterValueWrite = () =>
+            fixture.Native.KeyStates[NativeMethods.VirtualKeyControl] =
+                unchecked((short)0x8000);
+
+        var result = fixture.Subject.WriteApproval(Expected, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Empty(fixture.Native.InputBatches);
+    }
+
+    [Fact]
+    public void Unicode_fallback_fails_closed_when_final_focus_read_fails()
+    {
+        var fixture = WriterFixture.Create(ValueWriteAttempt.Unsupported);
+        fixture.Automation.FocusReadFailureOnCall = 2;
+
+        var result = fixture.Subject.WriteApproval(Expected, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Empty(fixture.Native.InputBatches);
     }
 
     [Theory]
@@ -127,13 +182,13 @@ public sealed class WindowsInputWriterTests
     }
 
     [Fact]
-    public void Focused_UIA_element_is_fetched_once_per_write_attempt()
+    public void Unicode_fallback_rechecks_focused_UIA_element_before_SendInput()
     {
         var fixture = WriterFixture.Create(ValueWriteAttempt.Unsupported);
 
         fixture.Subject.WriteApproval(Expected, CancellationToken.None);
 
-        Assert.Equal(1, fixture.Automation.FocusedElementCalls);
+        Assert.Equal(2, fixture.Automation.FocusedElementCalls);
     }
 
     [Theory]
@@ -167,6 +222,18 @@ public sealed class WindowsInputWriterTests
         var result = fixture.Subject.SendEnter(Expected, CancellationToken.None);
 
         Assert.True(result);
+        Assert.Equal(
+        [
+            "focused",
+            "foreground",
+            "pid",
+            $"modifier:{NativeMethods.VirtualKeyControl}",
+            $"modifier:{NativeMethods.VirtualKeyMenu}",
+            $"modifier:{NativeMethods.VirtualKeyShift}",
+            $"modifier:{NativeMethods.VirtualKeyLeftWindows}",
+            $"modifier:{NativeMethods.VirtualKeyRightWindows}",
+            "send-input"
+        ], fixture.Events);
         var batch = Assert.Single(fixture.Native.InputBatches);
         Assert.Collection(
             batch,
@@ -182,6 +249,30 @@ public sealed class WindowsInputWriterTests
                 Assert.Equal((ushort)0, key.ScanCode);
                 Assert.Equal(NativeMethods.KeyEventKeyUp, key.Flags);
             });
+    }
+
+    [Fact]
+    public void Enter_never_sends_when_same_window_focus_has_changed()
+    {
+        var fixture = WriterFixture.Create(ValueWriteAttempt.Written);
+        fixture.Automation.RuntimeId = "42.8";
+
+        var result = fixture.Subject.SendEnter(Expected, CancellationToken.None);
+
+        Assert.False(result);
+        Assert.Empty(fixture.Native.InputBatches);
+    }
+
+    [Fact]
+    public void Enter_fails_closed_when_final_focus_read_fails()
+    {
+        var fixture = WriterFixture.Create(ValueWriteAttempt.Written);
+        fixture.Automation.FocusReadFailureOnCall = 1;
+
+        var result = fixture.Subject.SendEnter(Expected, CancellationToken.None);
+
+        Assert.False(result);
+        Assert.Empty(fixture.Native.InputBatches);
     }
 
     [Theory]
@@ -267,8 +358,11 @@ public sealed class WindowsInputWriterTests
             return ProcessId;
         }
 
-        public short GetAsyncKeyState(int virtualKey) =>
-            KeyStates.GetValueOrDefault(virtualKey);
+        public short GetAsyncKeyState(int virtualKey)
+        {
+            events.Add($"modifier:{virtualKey}");
+            return KeyStates.GetValueOrDefault(virtualKey);
+        }
 
         public uint SendInput(IReadOnlyList<KeyboardInputCommand> inputs)
         {
@@ -310,6 +404,10 @@ public sealed class WindowsInputWriterTests
 
         public ValueWriteAttempt ValueAttempt { get; set; }
 
+        public Action? AfterValueWrite { get; set; }
+
+        public int? FocusReadFailureOnCall { get; set; }
+
         public int FocusedElementCalls { get; private set; }
 
         public int ValueWriteCount { get; private set; }
@@ -318,6 +416,11 @@ public sealed class WindowsInputWriterTests
         {
             events.Add("focused");
             FocusedElementCalls++;
+            if (FocusedElementCalls == FocusReadFailureOnCall)
+            {
+                throw new COMException("Focused element unavailable.");
+            }
+
             return new FakeFocusedElement(this, events);
         }
 
@@ -333,6 +436,7 @@ public sealed class WindowsInputWriterTests
             {
                 events.Add($"value:{value}");
                 owner.ValueWriteCount++;
+                owner.AfterValueWrite?.Invoke();
                 return owner.ValueAttempt;
             }
         }

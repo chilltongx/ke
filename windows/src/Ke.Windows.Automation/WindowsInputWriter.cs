@@ -174,9 +174,8 @@ public sealed class WindowsInputWriter : IWindowsInputWriter
             return FailedWrite();
         }
 
-        var focused = _automation.GetFocusedElement(cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        if (!string.Equals(focused.RuntimeId, expected.RuntimeId, StringComparison.Ordinal))
+        var focused = GetMatchingFocusedElement(expected, cancellationToken);
+        if (focused is null)
         {
             return FailedWrite();
         }
@@ -195,12 +194,6 @@ public sealed class WindowsInputWriter : IWindowsInputWriter
             return FailedWrite();
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        if (!MatchesForeground(expected, cancellationToken))
-        {
-            return FailedWrite();
-        }
-
         var approval = ProductInfo.ApprovalText[0];
         var inputs = new KeyboardInputCommand[]
         {
@@ -211,6 +204,12 @@ public sealed class WindowsInputWriter : IWindowsInputWriter
                 NativeMethods.KeyEventUnicode | NativeMethods.KeyEventKeyUp)
         };
         cancellationToken.ThrowIfCancellationRequested();
+        if (!IsNativeInputTargetSafe(expected, cancellationToken))
+        {
+            return FailedWrite();
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
         return _native.SendInput(inputs) == inputs.Length
             ? new(true, TextWriteMethod.UnicodeSendInput)
             : FailedWrite();
@@ -219,19 +218,63 @@ public sealed class WindowsInputWriter : IWindowsInputWriter
     public bool SendEnter(TargetIdentity expected, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!MatchesForeground(expected, cancellationToken) ||
-            !AreModifierKeysReleased())
-        {
-            return false;
-        }
-
         var inputs = new KeyboardInputCommand[]
         {
             new(NativeMethods.VirtualKeyReturn, 0, 0),
             new(NativeMethods.VirtualKeyReturn, 0, NativeMethods.KeyEventKeyUp)
         };
+        if (!IsNativeInputTargetSafe(expected, cancellationToken))
+        {
+            return false;
+        }
+
         cancellationToken.ThrowIfCancellationRequested();
         return _native.SendInput(inputs) == inputs.Length;
+    }
+
+    private bool IsNativeInputTargetSafe(
+        TargetIdentity expected,
+        CancellationToken cancellationToken)
+    {
+        if (GetMatchingFocusedElement(expected, cancellationToken) is null ||
+            !MatchesForeground(expected, cancellationToken) ||
+            !AreModifierKeysReleased())
+        {
+            return false;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return true;
+    }
+
+    private IFocusedInputElement? GetMatchingFocusedElement(
+        TargetIdentity expected,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var focused = _automation.GetFocusedElement(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            return string.Equals(
+                focused.RuntimeId,
+                expected.RuntimeId,
+                StringComparison.Ordinal)
+                ? focused
+                : null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is ElementNotAvailableException or
+            COMException or
+            InvalidOperationException or
+            NotSupportedException)
+        {
+            return null;
+        }
     }
 
     private bool MatchesForeground(
