@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Automation.Peers;
 using System.Windows.Input;
 using System.Windows.Interop;
 using Ke.Windows.Core;
@@ -17,8 +18,10 @@ public partial class MainWindow : Window
     private const double DragThreshold = 6;
 
     private readonly PanelPositionStore _positionStore;
+    private readonly ButtonFeedbackController _feedback;
     private PanelGestureController? _gesture;
     private HwndSource? _source;
+    private KeButtonAutomationPeer? _automationPeer;
 
     public MainWindow(PanelPositionStore positionStore)
     {
@@ -26,6 +29,10 @@ public partial class MainWindow : Window
 
         _positionStore = positionStore;
         InitializeComponent();
+        _feedback = new ButtonFeedbackController(
+            new WpfButtonFeedbackView(Disc, Glyph, this, PublishAccessibility),
+            new SystemFeedbackDelay(),
+            SystemParameters.ClientAreaAnimation);
 
         SourceInitialized += OnSourceInitialized;
     }
@@ -45,6 +52,7 @@ public partial class MainWindow : Window
 
     protected override void OnClosing(CancelEventArgs e)
     {
+        _feedback.Dispose();
         if (_source is not null)
         {
             _source.RemoveHook(WindowMessageHook);
@@ -52,6 +60,17 @@ public partial class MainWindow : Window
         }
 
         base.OnClosing(e);
+    }
+
+    protected override AutomationPeer OnCreateAutomationPeer()
+    {
+        _automationPeer ??= new KeButtonAutomationPeer(this);
+        return _automationPeer;
+    }
+
+    public void ShowSendResult(SendResult result)
+    {
+        _ = ObserveFeedbackAsync(_feedback.ShowResultAsync(result));
     }
 
     private IntPtr WindowMessageHook(
@@ -84,6 +103,7 @@ public partial class MainWindow : Window
             panelTopLeft,
             PhysicalWindowApi.GetDpi(handle),
             DragThreshold);
+        _feedback.ShowPressed();
         Mouse.Capture(this, CaptureMode.Element);
         e.Handled = true;
     }
@@ -121,6 +141,7 @@ public partial class MainWindow : Window
         if (!PhysicalWindowApi.TryGetCursor(out var cursor))
         {
             _gesture = null;
+            _feedback.ShowIdle();
             Mouse.Capture(null);
             e.Handled = true;
             return;
@@ -128,6 +149,7 @@ public partial class MainWindow : Window
 
         var release = _gesture.ReleaseAt(cursor);
         _gesture = null;
+        _feedback.ShowIdle();
         Mouse.Capture(null);
         e.Handled = true;
 
@@ -159,6 +181,24 @@ public partial class MainWindow : Window
     private void OnExitClick(object sender, RoutedEventArgs e)
     {
         Application.Current.Shutdown();
+    }
+
+    private void PublishAccessibility(string message)
+    {
+        _automationPeer ??=
+            UIElementAutomationPeer.CreatePeerForElement(this) as KeButtonAutomationPeer;
+        _automationPeer?.PublishResult(message);
+    }
+
+    private static async Task ObserveFeedbackAsync(Task feedback)
+    {
+        try
+        {
+            await feedback;
+        }
+        catch (OperationCanceledException)
+        {
+        }
     }
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
