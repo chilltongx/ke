@@ -1,0 +1,32 @@
+{
+  "application": "visual-studio-code",
+  "processImageName": "Code.exe",
+  "scenario": "chat-empty",
+  "focused": {
+    "controlType": "ControlType.Edit",
+    "className": "monaco-editor",
+    "automationId": "workbench.panel.input",
+    "genericRoleTokens": ["composer"],
+    "isEnabled": true,
+    "isKeyboardFocusable": true,
+    "isPassword": false,
+    "isReadOnly": false,
+    "textShape": "empty",
+    "emptyArtifactUtf16Hex": ""
+  },
+  "ancestors": [
+    {
+      "controlType": "ControlType.Pane",
+      "className": "part panel",
+      "automationId": "container-primary",
+      "genericRoleTokens": ["chat", "copilot"],
+      "isEnabled": true,
+      "isKeyboardFocusable": false,
+      "isPassword": false,
+      "isReadOnly": false,
+      "textShape": "non-empty",
+      "emptyArtifactUtf16Hex": null
+    }
+  ],
+  "nearby": []
+}

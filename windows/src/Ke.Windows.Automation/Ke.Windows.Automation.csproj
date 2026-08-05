@@ -6,4 +6,10 @@
   <ItemGroup>
     <ProjectReference Include="../Ke.Windows.Core/Ke.Windows.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../fixtures/codex-chat-empty.json"
+                      Link="Profiles/codex-chat-empty.json" />
+    <EmbeddedResource Include="../../fixtures/vscode-chat-empty.json"
+                      Link="Profiles/vscode-chat-empty.json" />
+  </ItemGroup>
 </Project>

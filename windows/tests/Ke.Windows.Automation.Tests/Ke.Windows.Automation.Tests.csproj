@@ -15,4 +15,7 @@
     <ProjectReference Include="../../src/Ke.Windows.Core/Ke.Windows.Core.csproj" />
     <ProjectReference Include="../../src/Ke.Windows.Automation/Ke.Windows.Automation.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <None Update="Fixtures/*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
