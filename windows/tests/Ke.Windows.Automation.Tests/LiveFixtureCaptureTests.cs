@@ -1,21 +1,28 @@
 using Ke.Windows.Automation;
 using Xunit;
-using Xunit.Sdk;
 
 namespace Ke.Windows.Automation.Tests;
 
+public sealed class CaptureFixtureFactAttribute : FactAttribute
+{
+    public const string SkipReason = "Set KE_CAPTURE_FIXTURE for interactive capture.";
+
+    public CaptureFixtureFactAttribute()
+    {
+        if (string.IsNullOrWhiteSpace(
+                Environment.GetEnvironmentVariable("KE_CAPTURE_FIXTURE")))
+        {
+            Skip = SkipReason;
+        }
+    }
+}
+
 public sealed class LiveFixtureCaptureTests
 {
-    [Fact]
+    [CaptureFixtureFact]
     public void Capture_sanitized_focused_control()
     {
-        var output = Environment.GetEnvironmentVariable("KE_CAPTURE_FIXTURE");
-        if (string.IsNullOrWhiteSpace(output))
-        {
-            throw SkipException.ForSkip(
-                "Set KE_CAPTURE_FIXTURE for interactive capture.");
-        }
-
+        var output = RequiredEnvironmentVariable("KE_CAPTURE_FIXTURE");
         var expectedProcess = RequiredEnvironmentVariable("KE_EXPECT_PROCESS");
         var scenario = RequiredEnvironmentVariable("KE_CAPTURE_SCENARIO");
         var application = expectedProcess switch
@@ -45,5 +52,21 @@ public sealed class LiveFixtureCaptureTests
         return string.IsNullOrWhiteSpace(value)
             ? throw new InvalidDataException($"{name} is required for interactive capture.")
             : value;
+    }
+}
+
+public sealed class CaptureFixtureFactAttributeTests
+{
+    [Fact]
+    public void Capture_fact_is_discovery_skipped_exactly_when_output_is_unset()
+    {
+        var output = Environment.GetEnvironmentVariable("KE_CAPTURE_FIXTURE");
+        var attribute = new CaptureFixtureFactAttribute();
+
+        Assert.Equal(
+            string.IsNullOrWhiteSpace(output)
+                ? CaptureFixtureFactAttribute.SkipReason
+                : null,
+            attribute.Skip);
     }
 }

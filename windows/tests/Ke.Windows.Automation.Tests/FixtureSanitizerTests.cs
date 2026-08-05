@@ -6,6 +6,18 @@ namespace Ke.Windows.Automation.Tests;
 
 public sealed class FixtureSanitizerTests
 {
+    private static readonly HashSet<string> FixtureProperties =
+    [
+        "application", "processImageName", "scenario", "focused", "ancestors", "nearby"
+    ];
+
+    private static readonly HashSet<string> ElementProperties =
+    [
+        "controlType", "className", "automationId", "genericRoleTokens", "isEnabled",
+        "isKeyboardFocusable", "isPassword", "isReadOnly", "textShape",
+        "emptyArtifactUtf16Hex"
+    ];
+
     [Fact]
     public void Sanitizer_emits_only_generic_tokens_and_never_raw_private_fields()
     {
@@ -22,10 +34,7 @@ public sealed class FixtureSanitizerTests
         Assert.DoesNotContain("alice", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("private message", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("RuntimeId", json, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("\"name\":", json, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("Hwnd", json, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("ProcessId", json, StringComparison.OrdinalIgnoreCase);
+        AssertFixtureSchema(json);
     }
 
     [Theory]
@@ -88,4 +97,43 @@ public sealed class FixtureSanitizerTests
             text),
         [],
         []);
+
+    private static void AssertFixtureSchema(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        Assert.Equal(JsonValueKind.Object, root.ValueKind);
+        AssertExactProperties(root, FixtureProperties);
+        AssertElement(root.GetProperty("focused"));
+
+        AssertElements(root.GetProperty("ancestors"));
+        AssertElements(root.GetProperty("nearby"));
+    }
+
+    private static void AssertElements(JsonElement elements)
+    {
+        Assert.Equal(JsonValueKind.Array, elements.ValueKind);
+        foreach (var element in elements.EnumerateArray())
+        {
+            AssertElement(element);
+        }
+    }
+
+    private static void AssertElement(JsonElement element)
+    {
+        Assert.Equal(JsonValueKind.Object, element.ValueKind);
+        AssertExactProperties(element, ElementProperties);
+    }
+
+    private static void AssertExactProperties(
+        JsonElement element,
+        IReadOnlySet<string> expected)
+    {
+        var actual = element.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        Assert.True(
+            actual.SetEquals(expected),
+            $"Unexpected JSON properties. Actual: {string.Join(", ", actual.Order())}");
+    }
 }
