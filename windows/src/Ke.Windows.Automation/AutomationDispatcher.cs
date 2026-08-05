@@ -14,8 +14,10 @@ public sealed class AutomationDispatcher : IAutomationDispatcher
     private static readonly TimeSpan JoinTimeout = TimeSpan.FromSeconds(5);
 
     private readonly BlockingCollection<IWorkItem> _queue = [];
+    private readonly object _disposeGate = new();
     private readonly Thread _thread;
     private int _disposed;
+    private InvalidOperationException? _disposeFailure;
 
     public AutomationDispatcher()
     {
@@ -55,16 +57,28 @@ public sealed class AutomationDispatcher : IAutomationDispatcher
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        lock (_disposeGate)
         {
-            return;
-        }
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                if (_disposeFailure is not null)
+                {
+                    throw new InvalidOperationException(
+                        "The automation dispatcher failed to stop.",
+                        _disposeFailure);
+                }
 
-        _queue.CompleteAdding();
-        if (!_thread.Join(JoinTimeout))
-        {
-            throw new InvalidOperationException(
-                "The automation dispatcher did not stop within five seconds.");
+                return;
+            }
+
+            Volatile.Write(ref _disposed, 1);
+            _queue.CompleteAdding();
+            if (!_thread.Join(JoinTimeout))
+            {
+                _disposeFailure = new InvalidOperationException(
+                    "The automation dispatcher did not stop within five seconds.");
+                throw _disposeFailure;
+            }
         }
     }
 
