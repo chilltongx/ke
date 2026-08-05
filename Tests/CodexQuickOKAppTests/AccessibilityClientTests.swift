@@ -299,6 +299,136 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertEqual(system.returnPIDs, [])
     }
 
+    func testCodexAutoFocusesComposerWhenNoElementIsFocused() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 870)
+        system.focusedElementNode = nil
+        system.composer.isFocused = false
+
+        let target = try AccessibilityClient(system: system).captureTarget()
+
+        XCTAssertTrue(system.elementsAreEqual(target.element, system.composer))
+        XCTAssertEqual(system.focusAttempts.count, 1)
+        XCTAssertTrue(system.focusAttempts[0] === system.composer)
+    }
+
+    func testCodexAutoFocusesComposerWhenButtonOwnsFocus() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 871)
+        system.focusedElementNode = system.sendButton
+
+        let target = try AccessibilityClient(system: system).captureTarget()
+
+        XCTAssertTrue(system.elementsAreEqual(target.element, system.composer))
+        XCTAssertTrue(system.focusAttempts.first === system.composer)
+    }
+
+    func testCodexAutoFocusUsesFirstEditableInputInTraversalOrder() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 872)
+        let firstInput = system.addEditableInputBeforeComposer(
+            title: "Unlabeled input"
+        )
+        system.focusedElementNode = nil
+
+        let target = try AccessibilityClient(system: system).captureTarget()
+
+        XCTAssertTrue(system.elementsAreEqual(target.element, firstInput))
+        XCTAssertTrue(system.focusAttempts.first === firstInput)
+    }
+
+    func testExistingEditableFocusIsNeverReplaced() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 873)
+        _ = system.addEditableInputBeforeComposer(title: "Earlier input")
+        system.focusedElementNode = system.composer
+
+        let target = try AccessibilityClient(system: system).captureTarget()
+
+        XCTAssertTrue(system.elementsAreEqual(target.element, system.composer))
+        XCTAssertTrue(system.focusAttempts.isEmpty)
+    }
+
+    func testNonCodexAppNeverAutoFocusesAnInput() {
+        let system = FakeAccessibilitySystem.validConversation(pid: 874)
+        system.frontmostBundleIdentifier = "com.microsoft.VSCode"
+        system.focusedElementNode = nil
+        system.composer.isFocused = false
+
+        XCTAssertThrowsError(
+            try AccessibilityClient(system: system).captureTarget()
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .focusedElementUnavailable
+            )
+        }
+        XCTAssertTrue(system.focusAttempts.isEmpty)
+    }
+
+    func testAutoFocusRequiresAssignmentToTakeEffect() {
+        let system = FakeAccessibilitySystem.validConversation(pid: 875)
+        system.focusedElementNode = system.sendButton
+        system.ignoreFocusAssignment = true
+
+        XCTAssertThrowsError(
+            try AccessibilityClient(system: system).captureTarget()
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .targetChanged
+            )
+        }
+        XCTAssertEqual(system.focusAttempts.count, 1)
+    }
+
+    func testAutoFocusPropagatesAssignmentFailure() {
+        let system = FakeAccessibilitySystem.validConversation(pid: 876)
+        system.focusedElementNode = system.sendButton
+        system.focusError = AccessibilityClient.AXError.focusedElementUnavailable
+
+        XCTAssertThrowsError(
+            try AccessibilityClient(system: system).captureTarget()
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .focusedElementUnavailable
+            )
+        }
+        XCTAssertEqual(system.focusAttempts.count, 1)
+    }
+
+    func testAutoFocusRejectsWindowChangeDuringAssignment() {
+        let system = FakeAccessibilitySystem.validConversation(pid: 877)
+        system.focusedElementNode = system.sendButton
+        system.afterFocusAttempt = {
+            system.focusedWindowNode = system.alternateWindow
+        }
+
+        XCTAssertThrowsError(
+            try AccessibilityClient(system: system).captureTarget()
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .targetChanged
+            )
+        }
+    }
+
+    func testAutoFocusScanStopsAtElementLimit() {
+        let system = FakeAccessibilitySystem.validConversation(pid: 878)
+        system.focusedElementNode = system.root
+        system.replaceWindowChildrenWithNonEditableNodes(
+            count: AccessibilityClient.maximumFocusedElementScanCount + 1
+        )
+
+        XCTAssertThrowsError(
+            try AccessibilityClient(system: system).captureTarget()
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .accessibilityTreeTruncated
+            )
+        }
+        XCTAssertTrue(system.focusAttempts.isEmpty)
+    }
+
     private func assertTargetChanged(
         _ operation: () throws -> Void,
         file: StaticString = #filePath,
@@ -336,8 +466,12 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
     var ignoreComposerWrites = false
     var childrenErrorNode: Node?
     var summaryErrorNode: Node?
+    var focusError: Error?
+    var ignoreFocusAssignment = false
+    var afterFocusAttempt: (() -> Void)?
     private(set) var returnPIDs: [pid_t] = []
     private(set) var sleepCount = 0
+    private(set) var focusAttempts: [Node] = []
 
     let root = Node()
     let alternateWindow = Node()
@@ -425,6 +559,17 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
 
     func isFocused(_ element: AnyObject) throws -> Bool {
         (element as! Node).isFocused
+    }
+
+    func setFocusedElement(_ element: AnyObject) throws {
+        let node = element as! Node
+        focusAttempts.append(node)
+        if let focusError { throw focusError }
+        guard !ignoreFocusAssignment else { return }
+        focusedElementNode?.isFocused = false
+        node.isFocused = true
+        focusedElementNode = node
+        afterFocusAttempt?()
     }
 
     func children(of element: AnyObject) throws -> [AnyObject] {
@@ -518,6 +663,37 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
             node.parent = main
             childrenByNode[ObjectIdentifier(node)] = []
             summariesByNode[ObjectIdentifier(node)] = makeSummary(role: "AXGroup")
+        }
+    }
+
+    func addEditableInputBeforeComposer(title: String) -> Node {
+        let input = Node(processIdentifier: frontmostPID)
+        input.parent = main
+        childrenByNode[ObjectIdentifier(input)] = []
+        summariesByNode[ObjectIdentifier(input)] = makeSummary(
+            role: "AXTextField",
+            title: title,
+            valueSettable: true
+        )
+        childrenByNode[ObjectIdentifier(main)] = [
+            input,
+            composer,
+            sendButton,
+        ]
+        return input
+    }
+
+    func replaceWindowChildrenWithNonEditableNodes(count: Int) {
+        let nodes = (0..<count).map { _ in
+            Node(processIdentifier: frontmostPID)
+        }
+        childrenByNode[ObjectIdentifier(root)] = nodes
+        for node in nodes {
+            node.parent = root
+            childrenByNode[ObjectIdentifier(node)] = []
+            summariesByNode[ObjectIdentifier(node)] = makeSummary(
+                role: "AXGroup"
+            )
         }
     }
 

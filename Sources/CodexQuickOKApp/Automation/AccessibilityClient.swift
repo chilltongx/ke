@@ -14,6 +14,7 @@ protocol AccessibilitySystemProviding: AnyObject {
     func parent(of element: AnyObject) throws -> AnyObject?
     func elementsAreEqual(_ lhs: AnyObject, _ rhs: AnyObject) -> Bool
     func isFocused(_ element: AnyObject) throws -> Bool
+    func setFocusedElement(_ element: AnyObject) throws
     func children(of element: AnyObject) throws -> [AnyObject]
     func summary(
         of element: AnyObject,
@@ -105,6 +106,11 @@ final class AccessibilityClient: FocusedInputControlling {
     static let maximumNearbyAncestorDepth = 4
     static let maximumNearbyTraversalDepth = 3
     static let maximumNearbyElementCount = 128
+    static let codexBundleIdentifier = "com.openai.codex"
+    static let editableInputRoles = Set([
+        kAXTextAreaRole as String,
+        kAXTextFieldRole as String,
+    ])
 
     private let system: any AccessibilitySystemProviding
     private let pollInterval: TimeInterval
@@ -134,8 +140,9 @@ final class AccessibilityClient: FocusedInputControlling {
         }
 
         let window = try system.focusedWindow(processIdentifier: pid)
-        let element = try resolveFocusedElement(
+        let element = try captureElement(
             processIdentifier: pid,
+            bundleIdentifier: bundleIdentifier,
             window: window
         )
         guard try system.processIdentifier(of: window) == pid,
@@ -346,6 +353,124 @@ final class AccessibilityClient: FocusedInputControlling {
         )
     }
 
+    private func captureElement(
+        processIdentifier: pid_t,
+        bundleIdentifier: String,
+        window: AnyObject
+    ) throws -> AnyObject {
+        let current: AnyObject?
+        do {
+            current = try resolveFocusedElement(
+                processIdentifier: processIdentifier,
+                window: window
+            )
+        } catch AXError.focusedElementUnavailable {
+            current = nil
+        }
+
+        if let current {
+            if try isEditableInput(
+                current,
+                expectedProcessIdentifier: processIdentifier
+            ) {
+                return current
+            }
+            guard bundleIdentifier == Self.codexBundleIdentifier else {
+                return current
+            }
+        } else if bundleIdentifier != Self.codexBundleIdentifier {
+            throw AXError.focusedElementUnavailable
+        }
+
+        return try focusFirstEditableInput(
+            processIdentifier: processIdentifier,
+            bundleIdentifier: bundleIdentifier,
+            window: window
+        )
+    }
+
+    private func isEditableInput(
+        _ element: AnyObject,
+        expectedProcessIdentifier: pid_t
+    ) throws -> Bool {
+        guard try system.processIdentifier(of: element)
+            == expectedProcessIdentifier else {
+            throw AXError.focusedElementUnavailable
+        }
+        let summary = try system.summary(of: element, parentIndex: nil)
+        return summary.enabled
+            && summary.valueSettable
+            && Self.editableInputRoles.contains(summary.role ?? "")
+    }
+
+    private func focusFirstEditableInput(
+        processIdentifier: pid_t,
+        bundleIdentifier: String,
+        window: AnyObject
+    ) throws -> AnyObject {
+        var queue = try system.children(of: window)
+        var offset = 0
+
+        while offset < queue.count {
+            guard offset < Self.maximumFocusedElementScanCount else {
+                throw AXError.accessibilityTreeTruncated
+            }
+            let candidate = queue[offset]
+            offset += 1
+
+            if try isEditableInput(
+                candidate,
+                expectedProcessIdentifier: processIdentifier
+            ) {
+                try system.setFocusedElement(candidate)
+                return try confirmAutoFocusedElement(
+                    candidate,
+                    processIdentifier: processIdentifier,
+                    bundleIdentifier: bundleIdentifier,
+                    window: window
+                )
+            }
+            queue.append(contentsOf: try system.children(of: candidate))
+        }
+        throw AXError.focusedElementUnavailable
+    }
+
+    private func confirmAutoFocusedElement(
+        _ candidate: AnyObject,
+        processIdentifier: pid_t,
+        bundleIdentifier: String,
+        window: AnyObject
+    ) throws -> AnyObject {
+        guard system.frontmostPID == processIdentifier,
+              system.frontmostBundleIdentifier == bundleIdentifier
+        else {
+            throw AXError.targetChanged
+        }
+
+        let latestWindow: AnyObject
+        let latestElement: AnyObject
+        do {
+            latestWindow = try system.focusedWindow(
+                processIdentifier: processIdentifier
+            )
+            latestElement = try resolveFocusedElement(
+                processIdentifier: processIdentifier,
+                window: latestWindow
+            )
+        } catch {
+            throw AXError.targetChanged
+        }
+
+        guard system.elementsAreEqual(latestWindow, window),
+              system.elementsAreEqual(latestElement, candidate),
+              try system.processIdentifier(of: latestElement)
+                == processIdentifier
+        else {
+            throw AXError.targetChanged
+        }
+        return candidate
+    }
+
     private func resolveFocusedElement(
         processIdentifier: pid_t,
         window: AnyObject
@@ -548,6 +673,16 @@ private final class SystemAccessibilityProvider: AccessibilitySystemProviding {
                 throw AccessibilityClient.AXError.invalidAccessibilityTree
             }
             return focused
+        }
+    }
+
+    func setFocusedElement(_ element: AnyObject) throws {
+        guard AXUIElementSetAttributeValue(
+            axElement(element),
+            kAXFocusedAttribute as CFString,
+            kCFBooleanTrue
+        ) == .success else {
+            throw AccessibilityClient.AXError.focusedElementUnavailable
         }
     }
 
