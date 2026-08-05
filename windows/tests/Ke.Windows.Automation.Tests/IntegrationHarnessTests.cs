@@ -93,21 +93,27 @@ public sealed class IntegrationHarnessTests
     [Fact]
     public async Task Teardown_kills_only_the_exact_process_after_close_timeout()
     {
-        using var process = Process.Start(new ProcessStartInfo
+        for (var iteration = 0; iteration < 20; iteration++)
         {
-            FileName = "cmd.exe",
-            Arguments = "/d /s /c \"ping 127.0.0.1 -n 30 >nul\"",
-            UseShellExecute = false,
-            CreateNoWindow = true
-        }) ?? throw new InvalidOperationException("Failed to start teardown fixture.");
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = "/d /s /c \"ping 127.0.0.1 -n 30 >nul\"",
+                UseShellExecute = false,
+                CreateNoWindow = true
+            }) ?? throw new InvalidOperationException("Failed to start teardown fixture.");
 
-        var result = await HarnessProcessTeardown.CloseExactAsync(
-            process,
-            TimeSpan.FromMilliseconds(50));
+            var result = await HarnessProcessTeardown.CloseExactAsync(
+                process,
+                TimeSpan.FromMilliseconds(50));
 
-        Assert.True(result.Forced);
-        Assert.True(result.Exited);
-        Assert.Empty(result.RemainingDescendantProcessIds);
+            Assert.True(result.Forced);
+            Assert.True(result.Exited, $"Root remained in iteration {iteration}.");
+            Assert.True(
+                result.RemainingDescendantProcessIds.Count == 0,
+                $"Descendants remained in iteration {iteration}: " +
+                string.Join(',', result.RemainingDescendantProcessIds));
+        }
     }
 
     [Fact]

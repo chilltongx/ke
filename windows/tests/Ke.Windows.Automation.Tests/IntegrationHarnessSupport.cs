@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows.Automation;
 using Ke.Windows.Automation;
@@ -208,6 +209,7 @@ internal sealed record HarnessTeardownResult(
 internal static class HarnessProcessTeardown
 {
     private static readonly TimeSpan ForcedExitTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan ExitPollInterval = TimeSpan.FromMilliseconds(20);
 
     internal static async Task<HarnessTeardownResult> CloseExactAsync(
         Process process,
@@ -216,40 +218,182 @@ internal static class HarnessProcessTeardown
         ArgumentNullException.ThrowIfNull(process);
         var processId = checked((uint)process.Id);
         var forced = false;
+        using var descendants = new ExactDescendantTracker(processId);
+        descendants.Discover();
 
         if (!process.HasExited)
         {
             _ = process.CloseMainWindow();
-            if (!await WaitForExitAsync(process, closeTimeout).ConfigureAwait(false))
+            if (!await WaitForExactTreeExitAsync(
+                    process,
+                    descendants,
+                    closeTimeout).ConfigureAwait(false))
             {
                 forced = true;
+                descendants.Discover();
                 process.Kill(entireProcessTree: true);
-                _ = await WaitForExitAsync(process, ForcedExitTimeout).ConfigureAwait(false);
+                _ = await WaitForExactTreeExitAsync(
+                    process,
+                    descendants,
+                    ForcedExitTimeout).ConfigureAwait(false);
             }
         }
 
-        var descendants = OperatingSystem.IsWindows()
-            ? ProcessTreeInspector.FindDescendants(processId)
-            : [];
-        return new(forced, process.HasExited, descendants);
+        descendants.Discover();
+        return new(
+            forced,
+            process.HasExited,
+            descendants.GetRemainingProcessIds());
     }
 
-    private static async Task<bool> WaitForExitAsync(Process process, TimeSpan timeout)
+    private static async Task<bool> WaitForExactTreeExitAsync(
+        Process root,
+        ExactDescendantTracker descendants,
+        TimeSpan timeout)
     {
-        if (process.HasExited)
+        if (timeout <= TimeSpan.Zero)
         {
-            return true;
+            descendants.Discover();
+            return root.HasExited && descendants.GetRemainingProcessIds().Count == 0;
         }
 
-        using var cancellation = new CancellationTokenSource(timeout);
+        var stopwatch = Stopwatch.StartNew();
+        var quiescentSamples = 0;
+        while (stopwatch.Elapsed < timeout)
+        {
+            descendants.Discover();
+            if (root.HasExited && descendants.GetRemainingProcessIds().Count == 0)
+            {
+                quiescentSamples++;
+                if (quiescentSamples == 2)
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                quiescentSamples = 0;
+            }
+
+            var remaining = timeout - stopwatch.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            await Task.Delay(
+                    remaining < ExitPollInterval ? remaining : ExitPollInterval)
+                .ConfigureAwait(false);
+        }
+
+        descendants.Discover();
+        return root.HasExited && descendants.GetRemainingProcessIds().Count == 0;
+    }
+}
+
+internal sealed class ExactDescendantTracker(uint rootProcessId) : IDisposable
+{
+    private readonly Dictionary<uint, Process> _processes = [];
+    private readonly HashSet<uint> _unresolvedProcessIds = [];
+    private int _disposed;
+
+    internal void Discover()
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var current = ProcessTreeInspector.FindDescendants(rootProcessId).ToHashSet();
+        _unresolvedProcessIds.RemoveWhere(processId => !current.Contains(processId));
+        foreach (var processId in current)
+        {
+            if (_processes.TryGetValue(processId, out var tracked))
+            {
+                if (!HasExited(tracked))
+                {
+                    continue;
+                }
+
+                tracked.Dispose();
+                _processes.Remove(processId);
+            }
+
+            if (_unresolvedProcessIds.Contains(processId))
+            {
+                continue;
+            }
+
+            Process? candidate = null;
+            try
+            {
+                candidate = Process.GetProcessById(checked((int)processId));
+                _ = candidate.StartTime;
+                _ = candidate.Handle;
+                if (!candidate.HasExited)
+                {
+                    _processes.Add(processId, candidate);
+                    candidate = null;
+                }
+            }
+            catch (ArgumentException)
+            {
+                // The exact PID exited between Toolhelp discovery and handle acquisition.
+            }
+            catch (InvalidOperationException)
+            {
+                // The exact PID exited while its stable process handle was opened.
+            }
+            catch (Win32Exception)
+            {
+                _unresolvedProcessIds.Add(processId);
+            }
+            finally
+            {
+                candidate?.Dispose();
+            }
+        }
+    }
+
+    internal IReadOnlyList<uint> GetRemainingProcessIds()
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        var remaining = _processes
+            .Where(pair => !HasExited(pair.Value))
+            .Select(pair => pair.Key)
+            .Concat(_unresolvedProcessIds)
+            .Distinct()
+            .Order()
+            .ToArray();
+        return remaining;
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        foreach (var process in _processes.Values)
+        {
+            process.Dispose();
+        }
+
+        _processes.Clear();
+        _unresolvedProcessIds.Clear();
+    }
+
+    private static bool HasExited(Process process)
+    {
         try
         {
-            await process.WaitForExitAsync(cancellation.Token).ConfigureAwait(false);
-            return true;
-        }
-        catch (OperationCanceledException)
-        {
             return process.HasExited;
+        }
+        catch (InvalidOperationException)
+        {
+            return true;
         }
     }
 }
