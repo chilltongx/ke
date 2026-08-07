@@ -1,5 +1,6 @@
 import AppKit
 import CodexQuickOKCore
+import QuartzCore
 
 enum HaloFeedbackState: Equatable {
     case success
@@ -30,9 +31,21 @@ final class HaloButtonView: NSView {
 
     private var gestureTracker: PointerGestureTracker?
     private var grabOffset: NSPoint?
+    let attentionHaloLayer = CAShapeLayer()
     private(set) var remainingPercent: Double?
     private(set) var feedbackState: HaloFeedbackState?
+    private(set) var attentionRequired = false
     private(set) var quotaToolTip = "周额度暂不可用"
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureAttentionHalo()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureAttentionHalo()
+    }
 
     var drawingState: HaloDrawingState {
         if feedbackState == .success {
@@ -59,6 +72,15 @@ final class HaloButtonView: NSView {
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: 64, height: 64)
+    }
+
+    override func layout() {
+        super.layout()
+        attentionHaloLayer.frame = bounds
+        let haloBounds = bounds.insetBy(dx: 4.5, dy: 4.5)
+        let path = CGPath(ellipseIn: haloBounds, transform: nil)
+        attentionHaloLayer.path = path
+        attentionHaloLayer.shadowPath = path
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -97,21 +119,28 @@ final class HaloButtonView: NSView {
         quotaToolTip = quota.map {
             "周额度剩余 \(Int($0.remainingPercent.rounded()))%，重置于 \($0.resetsAt.formatted())"
         } ?? "周额度暂不可用"
-        if feedbackState != .failure {
-            toolTip = quotaToolTip
-        }
+        if feedbackState == nil { restoreIdlePresentation() }
         needsDisplay = true
+    }
+
+    func setAttentionRequired(_ required: Bool) {
+        guard attentionRequired != required else { return }
+        attentionRequired = required
+        attentionHaloLayer.opacity = required && feedbackState == nil ? 1 : 0
+        if feedbackState == nil { restoreIdlePresentation() }
     }
 
     func showSuccessFeedback() {
         toolTip = quotaToolTip
         feedbackState = .success
+        attentionHaloLayer.opacity = 0
         setAccessibilityValue("已发送可")
         needsDisplay = true
     }
 
     func showFailureFeedback(_ message: String) {
         feedbackState = .failure
+        attentionHaloLayer.opacity = 0
         toolTip = message
         setAccessibilityValue(message)
         needsDisplay = true
@@ -120,9 +149,33 @@ final class HaloButtonView: NSView {
     func endFeedback() {
         guard feedbackState != nil else { return }
         feedbackState = nil
-        toolTip = quotaToolTip
-        setAccessibilityValue(quotaToolTip)
+        attentionHaloLayer.opacity = attentionRequired ? 1 : 0
+        restoreIdlePresentation()
         needsDisplay = true
+    }
+
+    private func configureAttentionHalo() {
+        wantsLayer = true
+        layer?.masksToBounds = false
+        attentionHaloLayer.fillColor = NSColor.clear.cgColor
+        attentionHaloLayer.strokeColor = CodexQuickOKColor.amber.cgColor
+        attentionHaloLayer.lineWidth = 2.5
+        attentionHaloLayer.shadowColor = CodexQuickOKColor.amber.cgColor
+        attentionHaloLayer.shadowRadius = 6
+        attentionHaloLayer.shadowOpacity = 0.9
+        attentionHaloLayer.shadowOffset = .zero
+        attentionHaloLayer.opacity = 0
+        layer?.addSublayer(attentionHaloLayer)
+    }
+
+    private func restoreIdlePresentation() {
+        if attentionRequired {
+            toolTip = "Codex 等待你的确认；\(quotaToolTip)"
+            setAccessibilityValue("Codex 等待你的确认")
+        } else {
+            toolTip = quotaToolTip
+            setAccessibilityValue(quotaToolTip)
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {

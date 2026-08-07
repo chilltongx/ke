@@ -67,7 +67,10 @@ final class HaloButtonViewTests: XCTestCase {
         button.showFailureFeedback("发送失败")
 
         XCTAssertEqual(button.feedbackState, .failure)
-        XCTAssertTrue(button.needsDisplay)
+        XCTAssertTrue(
+            button.needsDisplay || button.layer?.needsDisplay() == true,
+            "Layer-backed views may forward invalidation directly to their backing layer"
+        )
         XCTAssertEqual(
             button.drawingState,
             HaloDrawingState(
@@ -76,5 +79,21 @@ final class HaloButtonViewTests: XCTestCase {
                 halo: .red
             )
         )
+    }
+
+    func testAttentionAddsAmberHaloAndAccessibleReminder() {
+        let button = HaloButtonView(
+            frame: NSRect(x: 0, y: 0, width: 64, height: 64)
+        )
+
+        button.setAttentionRequired(true)
+
+        XCTAssertTrue(button.attentionRequired)
+        XCTAssertEqual(button.attentionHaloLayer.opacity, 1)
+        XCTAssertEqual(button.accessibilityValue() as? String, "Codex 等待你的确认")
+        XCTAssertTrue(button.toolTip?.contains("Codex 等待你的确认") == true)
+
+        button.setAttentionRequired(false)
+        XCTAssertEqual(button.attentionHaloLayer.opacity, 0)
     }
 }

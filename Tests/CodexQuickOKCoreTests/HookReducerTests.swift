@@ -5,6 +5,8 @@ final class HookReducerTests: XCTestCase {
     func testClassifiesApprovalRequestsWithoutTreatingOrdinaryQuestionsAsApproval() {
         XCTAssertTrue(ApprovalClassifier.isApprovalRequest("要我继续执行吗？"))
         XCTAssertTrue(ApprovalClassifier.isApprovalRequest("Please confirm, then I will proceed."))
+        XCTAssertTrue(ApprovalClassifier.isApprovalRequest("阶段完成，需要你确认后继续执行。"))
+        XCTAssertTrue(ApprovalClassifier.isApprovalRequest("Waiting for your confirmation before I proceed."))
         XCTAssertFalse(ApprovalClassifier.isApprovalRequest("这个函数为什么返回 nil？"))
         XCTAssertFalse(ApprovalClassifier.isApprovalRequest("修改已经完成。"))
     }

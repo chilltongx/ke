@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     static let codexBundleIdentifier = "com.openai.codex"
     static let quotaRefreshInterval: TimeInterval = 300
+    static let attentionRefreshInterval: TimeInterval = 3
     private static let activationLogger = Logger(
         subsystem: "com.codexquickok.CodexQuickOK",
         category: "activation"
@@ -36,6 +37,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: (any CompanionPanel)?
     private var controller: ManualApprovalController?
     private var quotaTimer: Timer?
+    private var attentionTimer: Timer?
+    private var attentionTask: Task<Void, Never>?
     private(set) var isAppServerStarted = false
     private var reconnectAttempt = 0
     private var reconnectTask: Task<Void, Never>?
@@ -272,6 +275,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.refreshQuota()
             }
         }
+        attentionTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.attentionRefreshInterval,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshTaskAttention()
+            }
+        }
         beginAppServerStart()
     }
 
@@ -283,6 +294,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         isShuttingDown = true
         quotaTimer?.invalidate()
+        attentionTimer?.invalidate()
+        attentionTask?.cancel()
+        attentionTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
         connectionEpoch &+= 1
@@ -307,6 +321,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         quotaTimer?.invalidate()
+        attentionTimer?.invalidate()
+        attentionTask?.cancel()
+        attentionTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
         connectionEpoch &+= 1
@@ -361,6 +378,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             reconnectAttempt = 0
             appServerStartTask = nil
             refreshQuota(connectionEpoch: epoch)
+            refreshTaskAttention(connectionEpoch: epoch)
         } catch {
             guard isCurrentConnection(epoch) else { return }
             appServerStartTask = nil
@@ -374,6 +392,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         refreshQuota(connectionEpoch: connectionEpoch)
+    }
+
+    func refreshTaskAttention() {
+        guard !isShuttingDown, isAppServerStarted else { return }
+        refreshTaskAttention(connectionEpoch: connectionEpoch)
+    }
+
+    private func refreshTaskAttention(connectionEpoch epoch: UInt64) {
+        guard isCurrentConnection(epoch), isAppServerStarted, attentionTask == nil else {
+            return
+        }
+        attentionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { attentionTask = nil }
+            do {
+                let attention = try await appServer.readRecentTaskAttention()
+                guard isCurrentConnection(epoch), !Task.isCancelled else { return }
+                controller?.setAttentionRequired(attention != nil)
+            } catch {
+                // Attention is best-effort. Quota polling owns connection recovery,
+                // so an older Codex without thread/read support does not restart-loop.
+            }
+        }
     }
 
     private func refreshQuota(connectionEpoch epoch: UInt64) {
@@ -403,6 +444,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quotaRequestGeneration &+= 1
         let failedEpoch = connectionEpoch
         isAppServerStarted = false
+        attentionTask?.cancel()
+        attentionTask = nil
+        controller?.setAttentionRequired(false)
         panel?.setQuota(nil)
         await appServer.stop()
         guard isCurrentConnection(failedEpoch) else { return }

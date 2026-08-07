@@ -14,10 +14,37 @@ final class FloatingPanelControllerTests: XCTestCase {
 
         controller.show(mode: .waiting)
         XCTAssertNil(controller.button.layer?.animation(forKey: "presence"))
+        XCTAssertTrue(controller.button.attentionRequired)
+        XCTAssertEqual(controller.button.attentionHaloLayer.opacity, 1)
+        XCTAssertNil(controller.button.attentionHaloLayer.animation(forKey: "attention-glow"))
 
         controller.setSending(true)
         XCTAssertNil(controller.button.layer?.animation(forKey: "sending"))
 
+        controller.hide()
+    }
+
+    func testWaitingModePulsesOnlyTheAttentionHalo() {
+        let controller = FloatingPanelController(
+            positionStore: PanelPositionStore(
+                defaults: UserDefaults(suiteName: #function)!
+            ),
+            reduceMotion: { false }
+        )
+
+        controller.show(mode: .waiting)
+
+        XCTAssertTrue(controller.button.attentionRequired)
+        XCTAssertNotNil(
+            controller.button.attentionHaloLayer.animation(forKey: "attention-glow")
+        )
+        XCTAssertNil(controller.button.layer?.animation(forKey: "presence"))
+
+        controller.show(mode: .running)
+        XCTAssertFalse(controller.button.attentionRequired)
+        XCTAssertNil(
+            controller.button.attentionHaloLayer.animation(forKey: "attention-glow")
+        )
         controller.hide()
     }
 

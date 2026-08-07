@@ -272,6 +272,7 @@ final class AppDelegateConfigurationTests: XCTestCase {
 
     func testQuotaRefreshUsesFiveMinuteInterval() {
         XCTAssertEqual(AppDelegate.quotaRefreshInterval, 300)
+        XCTAssertEqual(AppDelegate.attentionRefreshInterval, 3)
     }
 
     func testReconnectBackoffCapsAtFiveMinutes() {
@@ -447,6 +448,10 @@ private actor QuotaControlledAppServer: CodexAppServerServing {
         }
     }
 
+    func readRecentTaskAttention() async throws -> CodexTaskAttention? {
+        nil
+    }
+
     func setRateLimitUpdateHandler(
         _ handler: @escaping @Sendable () -> Void
     ) async throws {
@@ -513,6 +518,10 @@ private actor ControlledAppServer: CodexAppServerServing {
 
     func readRateLimits() async throws -> RateLimitsReadResult {
         throw TestError.unavailable
+    }
+
+    func readRecentTaskAttention() async throws -> CodexTaskAttention? {
+        nil
     }
 
     func setRateLimitUpdateHandler(

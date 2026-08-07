@@ -14,11 +14,14 @@ final class ManualApprovalController {
     private let sender: any CurrentApprovalSending
     private var sendTask: Task<Void, Never>?
     private var attemptID: UInt64 = 0
+    private var attentionRequired = false
+    private var isVisible = false
 
     init(panel: any CompanionPanel, sender: any CurrentApprovalSending) {
         self.panel = panel
         self.sender = sender
         panel.onActivate = { [weak self] in self?.beginSend() }
+        panel.onTemporaryHide = { [weak self] in self?.isVisible = false }
     }
 
     func start() {
@@ -26,12 +29,21 @@ final class ManualApprovalController {
     }
 
     func show() {
-        panel.show(mode: .running)
+        isVisible = true
+        panel.show(mode: attentionRequired ? .waiting : .running)
+    }
+
+    func setAttentionRequired(_ required: Bool) {
+        guard attentionRequired != required else { return }
+        attentionRequired = required
+        guard isVisible else { return }
+        panel.show(mode: required ? .waiting : .running)
     }
 
     func stop() {
         attemptID &+= 1
         sendTask?.cancel()
+        isVisible = false
         panel.setSending(false)
         panel.hide()
     }
@@ -52,6 +64,7 @@ final class ManualApprovalController {
             do {
                 try await sender.sendOK()
                 guard attemptID == currentAttempt else { return }
+                setAttentionRequired(false)
                 panel.showSuccess()
             } catch is CancellationError {
                 return

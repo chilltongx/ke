@@ -29,6 +29,36 @@ final class ManualApprovalControllerTests: XCTestCase {
         XCTAssertEqual(panel.lastMode, .running)
     }
 
+    func testAttentionUsesWaitingModeAndSuccessfulSendClearsIt() async {
+        let panel = RecordingPanel()
+        let sender = StubSender()
+        let controller = ManualApprovalController(panel: panel, sender: sender)
+        controller.start()
+
+        controller.setAttentionRequired(true)
+        XCTAssertEqual(panel.lastMode, .waiting)
+
+        panel.onActivate?()
+        await waitUntil { panel.successCount == 1 }
+
+        XCTAssertEqual(panel.lastMode, .running)
+        XCTAssertEqual(sender.callCount, 1)
+    }
+
+    func testAttentionDoesNotReshowTemporarilyHiddenPanel() {
+        let panel = RecordingPanel()
+        let controller = ManualApprovalController(panel: panel, sender: StubSender())
+        controller.start()
+        panel.hide()
+        panel.onTemporaryHide?()
+
+        controller.setAttentionRequired(true)
+
+        XCTAssertEqual(panel.lastMode, .hidden)
+        controller.show()
+        XCTAssertEqual(panel.lastMode, .waiting)
+    }
+
     func testSecondClickIsIgnoredWhileSendRuns() async {
         let panel = RecordingPanel()
         let sender = StubSender(suspended: true)

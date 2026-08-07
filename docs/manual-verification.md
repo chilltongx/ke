@@ -38,6 +38,11 @@
 | 21 | 从其他应用切回 Codex，不点击 composer，单击“可”后发送一次 | PENDING (manual) |
 | 22 | Codex 首个可编辑元素为明确搜索框时闪红且不输入 | PENDING (manual) |
 | 23 | VS Code 和微信没有输入焦点时不启用 Codex 自动扫描 | PENDING (manual) |
+| 24 | Codex 任务完成且最终回复明确等待确认时，约 3 秒内出现琥珀色呼吸光晕 | PENDING (manual) |
+| 25 | 普通完成回复不会触发琥珀色光晕 | PASS (automatic) |
+| 26 | 等待确认后发送新回复，琥珀色光晕自动消失 | PENDING (manual) |
+| 27 | 启用“减少动态效果”时，等待确认光晕常亮且不闪动 | PASS (automatic) |
+| 28 | 临时隐藏按钮后，等待确认轮询不会擅自重新显示按钮 | PASS (automatic) |
 
 微信只能使用测试联系人或“文件传输助手”，VS Code 和 Codex 只能使用专门测试会话。
 不得向真实联系人、工作群或生产任务执行发送验收。自动化 probe 只能写入“探针”再清空，

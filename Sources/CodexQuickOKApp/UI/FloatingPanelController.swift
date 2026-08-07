@@ -71,6 +71,7 @@ protocol CompanionPanel: AnyObject {
 final class FloatingPanelController: NSObject, CompanionPanel {
     private enum AnimationKey {
         static let presence = "presence"
+        static let attention = "attention-glow"
         static let sending = "sending"
         static let success = "success"
         static let failure = "failure"
@@ -174,6 +175,7 @@ final class FloatingPanelController: NSObject, CompanionPanel {
 
     func show(mode: CompanionMode) {
         self.mode = mode
+        button.setAttentionRequired(mode == .waiting)
         guard mode != .hidden else {
             hide()
             return
@@ -187,6 +189,7 @@ final class FloatingPanelController: NSObject, CompanionPanel {
 
     func hide() {
         mode = .hidden
+        button.setAttentionRequired(false)
         cancelFeedback()
         removeMotionAnimations()
         panel.orderOut(nil)
@@ -272,10 +275,21 @@ final class FloatingPanelController: NSObject, CompanionPanel {
             return
         }
 
+        if mode == .waiting {
+            let animation = CABasicAnimation(keyPath: "opacity")
+            animation.fromValue = 0.35
+            animation.toValue = 1
+            animation.duration = 1.1
+            animation.autoreverses = true
+            animation.repeatCount = .infinity
+            button.attentionHaloLayer.add(animation, forKey: AnimationKey.attention)
+            return
+        }
+
         let animation = CABasicAnimation(keyPath: "transform.scale")
-        animation.fromValue = mode == .waiting ? 0.97 : 0.985
-        animation.toValue = mode == .waiting ? 1.03 : 1.015
-        animation.duration = mode == .waiting ? 0.9 : 1.8
+        animation.fromValue = 0.985
+        animation.toValue = 1.015
+        animation.duration = 1.8
         animation.autoreverses = true
         animation.repeatCount = .infinity
         button.layer?.add(animation, forKey: AnimationKey.presence)
@@ -309,6 +323,7 @@ final class FloatingPanelController: NSObject, CompanionPanel {
 
     private func removeMotionAnimations() {
         button.layer?.removeAnimation(forKey: AnimationKey.presence)
+        button.attentionHaloLayer.removeAnimation(forKey: AnimationKey.attention)
         button.layer?.removeAnimation(forKey: AnimationKey.sending)
         button.layer?.removeAnimation(forKey: AnimationKey.success)
         button.layer?.removeAnimation(forKey: AnimationKey.failure)
