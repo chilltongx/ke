@@ -40,6 +40,7 @@ final class FocusedChatApprovalSender: CurrentApprovalSending {
         sending = true
         defer { sending = false }
 
+        try await input.prepareTargetCapture()
         let target = try input.captureTarget()
         let match = try classifier.classify(
             bundleIdentifier: target.bundleIdentifier,
@@ -47,21 +48,21 @@ final class FocusedChatApprovalSender: CurrentApprovalSending {
         )
         let rawValue = try input.composerValue(in: target)
         let value = match.normalizedComposerValue(rawValue)
-        guard value.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        ).isEmpty else {
+        guard value.isEmpty else {
             throw FocusedChatSendError.existingDraft
         }
 
         try input.revalidate(target)
         let latestRawValue = try input.composerValue(in: target)
         let latestValue = match.normalizedComposerValue(latestRawValue)
-        guard latestValue.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        ).isEmpty else {
+        guard latestValue.isEmpty else {
             throw FocusedChatSendError.existingDraft
         }
-        try input.setComposerValue("可", in: target)
+        try input.setComposerValue(
+            "可",
+            expectedCurrentValue: latestRawValue,
+            in: target
+        )
         try await input.waitUntilComposerValue(
             "可",
             in: target,

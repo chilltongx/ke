@@ -59,6 +59,21 @@ final class ManualApprovalControllerTests: XCTestCase {
         XCTAssertEqual(panel.lastMode, .waiting)
     }
 
+    func testTaskTerminalReminderWaitsWhileHiddenAndForwardsOnReopen() {
+        let panel = RecordingPanel()
+        let controller = ManualApprovalController(panel: panel, sender: StubSender())
+        controller.start()
+
+        controller.showTaskTerminal(.completed)
+        panel.hide()
+        panel.onTemporaryHide?()
+        controller.showTaskTerminal(.interrupted)
+
+        XCTAssertEqual(panel.terminalOutcomes, [.completed])
+        controller.show()
+        XCTAssertEqual(panel.terminalOutcomes, [.completed, .interrupted])
+    }
+
     func testSecondClickIsIgnoredWhileSendRuns() async {
         let panel = RecordingPanel()
         let sender = StubSender(suspended: true)
@@ -170,6 +185,7 @@ final class RecordingPanel: CompanionPanel {
     private(set) var failures: [String] = []
     private(set) var successCount = 0
     private(set) var quotas: [WeeklyQuota?] = []
+    private(set) var terminalOutcomes: [CodexTerminalOutcome] = []
 
     func show(mode: CompanionMode) {
         lastMode = mode
@@ -185,6 +201,9 @@ final class RecordingPanel: CompanionPanel {
     func setSending(_ sending: Bool) { sendingValues.append(sending) }
     func showSuccess() { successCount += 1 }
     func showFailure(_ message: String) { failures.append(message) }
+    func showTaskTerminal(_ outcome: CodexTerminalOutcome) {
+        terminalOutcomes.append(outcome)
+    }
 }
 
 @MainActor

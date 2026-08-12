@@ -65,16 +65,23 @@ protocol CompanionPanel: AnyObject {
     func setSending(_ sending: Bool)
     func showSuccess()
     func showFailure(_ message: String)
+    func showTaskTerminal(_ outcome: CodexTerminalOutcome)
 }
 
 @MainActor
 final class FloatingPanelController: NSObject, CompanionPanel {
+    private static let failureDisplayDuration: TimeInterval = 4
+    private static let terminalFlashDuration: TimeInterval = 1.6
+
     private enum AnimationKey {
         static let presence = "presence"
         static let attention = "attention-glow"
+        static let attentionFirefly = "attention-firefly"
+        static let attentionDrift = "attention-firefly-drift"
         static let sending = "sending"
         static let success = "success"
         static let failure = "failure"
+        static let taskTerminal = "task-terminal"
     }
 
     private let panel: NSPanel
@@ -93,7 +100,9 @@ final class FloatingPanelController: NSObject, CompanionPanel {
     private var mode: CompanionMode = .hidden
     private var isSending = false
     private var isShowingFeedback = false
-
+    private var feedbackGeneration: UInt64 = 0
+    private var terminalQueue: [CodexTerminalOutcome] = []
+    private var activeTerminalOutcome: CodexTerminalOutcome?
     var onActivate: (() -> Void)? {
         didSet { button.onActivate = onActivate }
     }
@@ -127,10 +136,12 @@ final class FloatingPanelController: NSObject, CompanionPanel {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.contentView = button
+        button.reduceMotion = reduceMotion
 
         button.wantsLayer = true
         button.onMoveOrigin = { [weak self] origin in
-            self?.panel.setFrameOrigin(origin)
+            guard let self else { return }
+            panel.setFrameOrigin(origin)
         }
         button.onDragEnded = { [weak self] in
             self?.persistPosition()
@@ -191,6 +202,9 @@ final class FloatingPanelController: NSObject, CompanionPanel {
         mode = .hidden
         button.setAttentionRequired(false)
         cancelFeedback()
+        terminalQueue.removeAll()
+        activeTerminalOutcome = nil
+        button.hideTerminalFlash()
         removeMotionAnimations()
         panel.orderOut(nil)
     }
@@ -204,16 +218,25 @@ final class FloatingPanelController: NSObject, CompanionPanel {
 
     func setSending(_ sending: Bool) {
         isSending = sending
-        button.isActivationEnabled = !sending
         if sending {
+            cancelActiveTerminalFlash()
             cancelFeedback()
+            button.setSending(true)
             updateContinuousAnimation()
-        } else if !isShowingFeedback {
-            updateContinuousAnimation()
+        } else {
+            button.setSending(false)
+            if !isShowingFeedback {
+                if !startNextTerminalFlashIfPossible() {
+                    updateContinuousAnimation()
+                }
+            }
         }
     }
 
     func showSuccess() {
+        cancelActiveTerminalFlash()
+        button.layer?.opacity = 1
+        button.layer?.setAffineTransform(.identity)
         button.showSuccessFeedback()
         accessibilityAnnouncer.announce("已发送可", for: button)
         let animation = CAKeyframeAnimation(keyPath: "transform.scale")
@@ -230,19 +253,29 @@ final class FloatingPanelController: NSObject, CompanionPanel {
     }
 
     func showFailure(_ message: String) {
+        cancelActiveTerminalFlash()
         NSSound.beep()
+        button.layer?.opacity = 1
+        button.layer?.setAffineTransform(.identity)
         button.showFailureFeedback(message)
+        accessibilityAnnouncer.announce(message, for: button)
         let animation = CAKeyframeAnimation(keyPath: "opacity")
         animation.values = [1, 0.45, 1, 0.45, 1]
         animation.duration = 0.55
         showFeedback(
             motionIsAllowed ? animation : nil,
             key: AnimationKey.failure,
-            duration: animation.duration,
+            duration: Self.failureDisplayDuration,
             completion: { [weak button] in
                 button?.endFeedback()
             }
         )
+    }
+
+    func showTaskTerminal(_ outcome: CodexTerminalOutcome) {
+        guard mode != .hidden else { return }
+        terminalQueue.append(outcome)
+        startNextTerminalFlashIfPossible()
     }
 
     @objc private func refreshQuota() {
@@ -276,13 +309,18 @@ final class FloatingPanelController: NSObject, CompanionPanel {
         }
 
         if mode == .waiting {
-            let animation = CABasicAnimation(keyPath: "opacity")
-            animation.fromValue = 0.35
-            animation.toValue = 1
-            animation.duration = 1.1
-            animation.autoreverses = true
-            animation.repeatCount = .infinity
-            button.attentionHaloLayer.add(animation, forKey: AnimationKey.attention)
+            button.attentionHaloLayer.add(
+                makeAmbientGlowAnimation(),
+                forKey: AnimationKey.attention
+            )
+            button.attentionFireflyLayer.add(
+                makeFireflyFlickerAnimation(),
+                forKey: AnimationKey.attentionFirefly
+            )
+            button.attentionFireflyLayer.add(
+                makeFireflyDriftAnimation(),
+                forKey: AnimationKey.attentionDrift
+            )
             return
         }
 
@@ -301,32 +339,145 @@ final class FloatingPanelController: NSObject, CompanionPanel {
         duration: TimeInterval,
         completion: @escaping @MainActor () -> Void = {}
     ) {
-        feedbackScheduler.cancel()
+        let generation = beginFeedbackSchedule()
         removeMotionAnimations()
         isShowingFeedback = true
         if let animation {
             button.layer?.add(animation, forKey: key)
         }
         feedbackScheduler.schedule(after: duration) { [weak self] in
-            guard let self else { return }
+            guard let self, feedbackGeneration == generation else { return }
             isShowingFeedback = false
             completion()
-            updateContinuousAnimation()
+            if !startNextTerminalFlashIfPossible() {
+                updateContinuousAnimation()
+            }
         }
     }
 
-    private func cancelFeedback() {
-        feedbackScheduler.cancel()
+    @discardableResult
+    private func startNextTerminalFlashIfPossible() -> Bool {
+        guard !isShowingFeedback,
+              !isSending,
+              mode != .hidden,
+              !terminalQueue.isEmpty
+        else { return false }
+
+        let outcome = terminalQueue.removeFirst()
+        let announcement = outcome == .completed ? "任务已完成" : "任务已终止"
+        let generation = beginFeedbackSchedule()
+        removeMotionAnimations()
+        button.showTerminalFlash(outcome)
+        activeTerminalOutcome = outcome
+        accessibilityAnnouncer.announce(announcement, for: button)
+        isShowingFeedback = true
+
+        if motionIsAllowed {
+            let animation = CAKeyframeAnimation(keyPath: "shadowOpacity")
+            animation.values = [0, 0.24, 0.02, 0.24, 0.02, 0.24, 0]
+            animation.keyTimes = [0, 0.13, 0.29, 0.42, 0.58, 0.71, 1]
+            animation.timingFunctions = Array(
+                repeating: CAMediaTimingFunction(name: .easeInEaseOut),
+                count: 6
+            )
+            animation.duration = Self.terminalFlashDuration
+            button.terminalFlashLayer.add(
+                animation,
+                forKey: AnimationKey.taskTerminal
+            )
+        }
+
+        feedbackScheduler.schedule(after: Self.terminalFlashDuration) { [weak self] in
+            guard let self, feedbackGeneration == generation else { return }
+            isShowingFeedback = false
+            activeTerminalOutcome = nil
+            button.hideTerminalFlash()
+            if !startNextTerminalFlashIfPossible() {
+                updateContinuousAnimation()
+            }
+        }
+        return true
+    }
+
+    private func cancelActiveTerminalFlash() {
+        guard activeTerminalOutcome != nil else { return }
+        invalidateFeedbackSchedule()
+        activeTerminalOutcome = nil
         isShowingFeedback = false
+        button.hideTerminalFlash()
+    }
+
+    private func cancelFeedback() {
+        invalidateFeedbackSchedule()
+        isShowingFeedback = false
+        activeTerminalOutcome = nil
         button.endFeedback()
+        button.hideTerminalFlash()
+    }
+
+    private func beginFeedbackSchedule() -> UInt64 {
+        feedbackScheduler.cancel()
+        feedbackGeneration &+= 1
+        return feedbackGeneration
+    }
+
+    private func invalidateFeedbackSchedule() {
+        feedbackScheduler.cancel()
+        feedbackGeneration &+= 1
     }
 
     private func removeMotionAnimations() {
         button.layer?.removeAnimation(forKey: AnimationKey.presence)
         button.attentionHaloLayer.removeAnimation(forKey: AnimationKey.attention)
+        button.attentionFireflyLayer.removeAnimation(
+            forKey: AnimationKey.attentionFirefly
+        )
+        button.attentionFireflyLayer.removeAnimation(
+            forKey: AnimationKey.attentionDrift
+        )
         button.layer?.removeAnimation(forKey: AnimationKey.sending)
         button.layer?.removeAnimation(forKey: AnimationKey.success)
         button.layer?.removeAnimation(forKey: AnimationKey.failure)
+        button.terminalFlashLayer.removeAnimation(forKey: AnimationKey.taskTerminal)
+    }
+
+    private func makeAmbientGlowAnimation() -> CAKeyframeAnimation {
+        let animation = CAKeyframeAnimation(keyPath: "opacity")
+        animation.values = [0.42, 0.51, 0.46, 0.59, 0.48, 0.55, 0.44]
+        animation.keyTimes = [0, 0.16, 0.34, 0.53, 0.69, 0.87, 1]
+        animation.timingFunctions = Array(
+            repeating: CAMediaTimingFunction(name: .easeInEaseOut),
+            count: 6
+        )
+        animation.duration = 6.4
+        animation.repeatCount = .infinity
+        return animation
+    }
+
+    private func makeFireflyFlickerAnimation() -> CAKeyframeAnimation {
+        let animation = CAKeyframeAnimation(keyPath: "opacity")
+        animation.values = [0.20, 0.28, 0.70, 0.31, 0.44, 0.25, 0.76, 0.22]
+        animation.keyTimes = [0, 0.13, 0.24, 0.39, 0.57, 0.72, 0.84, 1]
+        animation.timingFunctions = Array(
+            repeating: CAMediaTimingFunction(name: .easeInEaseOut),
+            count: 7
+        )
+        animation.duration = 7.7
+        animation.repeatCount = .infinity
+        return animation
+    }
+
+    private func makeFireflyDriftAnimation() -> CAKeyframeAnimation {
+        let animation = CAKeyframeAnimation(keyPath: "transform.rotation.z")
+        animation.values = [-0.22, -0.08, 0.11, 0.04, 0.20, -0.03, -0.22]
+        animation.keyTimes = [0, 0.17, 0.36, 0.51, 0.70, 0.86, 1]
+        animation.timingFunctions = Array(
+            repeating: CAMediaTimingFunction(name: .easeInEaseOut),
+            count: 6
+        )
+        animation.duration = 13.6
+        animation.repeatCount = .infinity
+        return animation
     }
 
     private func persistPosition() {

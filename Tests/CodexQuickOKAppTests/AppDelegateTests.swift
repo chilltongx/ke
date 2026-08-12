@@ -81,6 +81,100 @@ final class AppDelegateManualModeTests: XCTestCase {
         XCTAssertEqual(panel.lastMode, .running)
     }
 
+    func testTerminalSnapshotPrimesThenPublishesEachNewTurnOnce() {
+        let panel = RecordingPanel()
+        let delegate = makeDelegate(terminalMonitoringStartedAt: 100)
+        delegate.configureManualRuntime(panel: panel, sender: StubSender())
+        let old = terminalTurn(threadID: "old", turnID: "turn-1", outcome: .completed)
+        let completed = terminalTurn(
+            threadID: "new",
+            turnID: "turn-2",
+            outcome: .completed,
+            completedAt: 100
+        )
+        let interrupted = terminalTurn(
+            threadID: "other",
+            turnID: "turn-3",
+            outcome: .interrupted,
+            completedAt: 101
+        )
+        let newlyVisibleHistorical = terminalTurn(
+            threadID: "historical",
+            turnID: "turn-4",
+            outcome: .completed,
+            completedAt: 99
+        )
+
+        delegate.applyRecentTaskSnapshot(
+            CodexRecentTaskSnapshot(attention: nil, terminalTurns: [old])
+        )
+        delegate.applyRecentTaskSnapshot(
+            CodexRecentTaskSnapshot(
+                attention: nil,
+                terminalTurns: [old, newlyVisibleHistorical, completed, interrupted]
+            )
+        )
+        delegate.applyRecentTaskSnapshot(
+            CodexRecentTaskSnapshot(
+                attention: nil,
+                terminalTurns: [old, newlyVisibleHistorical, completed, interrupted]
+            )
+        )
+
+        XCTAssertEqual(panel.terminalOutcomes, [.completed, .interrupted])
+    }
+
+    func testInitialSnapshotPublishesTurnsCompletedSinceMonitoringBegan() {
+        let panel = RecordingPanel()
+        let delegate = makeDelegate(terminalMonitoringStartedAt: 100)
+        delegate.configureManualRuntime(panel: panel, sender: StubSender())
+        let historical = terminalTurn(
+            threadID: "old",
+            turnID: "turn-1",
+            outcome: .completed,
+            completedAt: 99
+        )
+        let completedAfterLaunch = terminalTurn(
+            threadID: "new",
+            turnID: "turn-2",
+            outcome: .completed,
+            completedAt: 100
+        )
+        let interruptedAfterLaunch = terminalTurn(
+            threadID: "other",
+            turnID: "turn-3",
+            outcome: .interrupted,
+            completedAt: 101
+        )
+
+        delegate.applyRecentTaskSnapshot(
+            CodexRecentTaskSnapshot(
+                attention: nil,
+                terminalTurns: [
+                    historical,
+                    completedAfterLaunch,
+                    interruptedAfterLaunch,
+                ]
+            )
+        )
+
+        XCTAssertEqual(panel.terminalOutcomes, [.completed, .interrupted])
+    }
+
+    private func terminalTurn(
+        threadID: String,
+        turnID: String,
+        outcome: CodexTerminalOutcome,
+        completedAt: Int = 1
+    ) -> CodexTerminalTurn {
+        CodexTerminalTurn(
+            threadID: threadID,
+            turnID: turnID,
+            outcome: outcome,
+            completedAt: completedAt
+        )
+    }
+
     func testReopenDuringSuspendedSendKeepsSingleInFlightAttempt() async {
         let panel = RecordingPanel()
         let sender = StubSender(suspended: true)
@@ -206,6 +300,7 @@ final class AppDelegateManualModeTests: XCTestCase {
         ) -> Void = { $0() },
         initialActivationRestoreTargetProcessIdentifier: pid_t? = nil,
         focusRestoreTargetProvider: @escaping () -> pid_t? = { nil },
+        terminalMonitoringStartedAt: Int = Int(Date().timeIntervalSince1970),
         restoreApplicationActivation: @escaping @MainActor (pid_t) -> Void = { _ in }
     ) -> AppDelegate {
         AppDelegate(
@@ -218,6 +313,7 @@ final class AppDelegateManualModeTests: XCTestCase {
             initialActivationRestoreTargetProcessIdentifier:
                 initialActivationRestoreTargetProcessIdentifier,
             focusRestoreTargetProvider: focusRestoreTargetProvider,
+            terminalMonitoringStartedAt: terminalMonitoringStartedAt,
             restoreApplicationActivation: restoreApplicationActivation
         )
     }
@@ -448,8 +544,8 @@ private actor QuotaControlledAppServer: CodexAppServerServing {
         }
     }
 
-    func readRecentTaskAttention() async throws -> CodexTaskAttention? {
-        nil
+    func readRecentTaskSnapshot() async throws -> CodexRecentTaskSnapshot {
+        CodexRecentTaskSnapshot(attention: nil, terminalTurns: [])
     }
 
     func setRateLimitUpdateHandler(
@@ -520,8 +616,8 @@ private actor ControlledAppServer: CodexAppServerServing {
         throw TestError.unavailable
     }
 
-    func readRecentTaskAttention() async throws -> CodexTaskAttention? {
-        nil
+    func readRecentTaskSnapshot() async throws -> CodexRecentTaskSnapshot {
+        CodexRecentTaskSnapshot(attention: nil, terminalTurns: [])
     }
 
     func setRateLimitUpdateHandler(

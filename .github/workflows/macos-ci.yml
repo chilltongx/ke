@@ -1,0 +1,58 @@
+name: macOS CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "main"
+      - "feat/**"
+      - "feature/**"
+    paths:
+      - "Package.swift"
+      - "Sources/**"
+      - "Tests/**"
+      - "Resources/**"
+      - "scripts/**"
+      - "README.md"
+      - "docs/manual-verification.md"
+      - ".github/workflows/macos-ci.yml"
+  pull_request:
+    paths:
+      - "Package.swift"
+      - "Sources/**"
+      - "Tests/**"
+      - "Resources/**"
+      - "scripts/**"
+      - "README.md"
+      - "docs/manual-verification.md"
+      - ".github/workflows/macos-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      # Live probes are opt-in and may target the foreground app. They must
+      # never run on shared CI hosts.
+      KE_FOCUSED_CHAT_LIVE_TESTS: "0"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run Swift tests
+        run: swift test
+
+      - name: Check packaging and isolated installer behavior
+        run: zsh Tests/PackagingTests.sh
+
+      - name: Check deterministic app icon rendering
+        run: zsh Tests/AppIconTests.sh
+
+      - name: Check signing scripts with command substitutes
+        run: zsh Tests/SigningTests.sh

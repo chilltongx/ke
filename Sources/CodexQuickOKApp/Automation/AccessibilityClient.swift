@@ -8,6 +8,7 @@ protocol AccessibilitySystemProviding: AnyObject {
     var frontmostPID: pid_t? { get }
     var frontmostBundleIdentifier: String? { get }
 
+    func enableEnhancedAccessibility(processIdentifier: pid_t) throws
     func focusedWindow(processIdentifier: pid_t) throws -> AnyObject
     func focusedElement(processIdentifier: pid_t) throws -> AnyObject
     func processIdentifier(of element: AnyObject) throws -> pid_t
@@ -21,9 +22,17 @@ protocol AccessibilitySystemProviding: AnyObject {
         parentIndex: Int?
     ) throws -> AccessibilityClient.ElementSummary
     func composerValue(of element: AnyObject) throws -> String
-    func setComposerValue(_ value: String, on element: AnyObject) throws
+    func setComposerValue(
+        _ value: String,
+        expectedCurrentValue: String,
+        on element: AnyObject
+    ) throws
     func postReturn(processIdentifier: pid_t) throws
     func sleep(for interval: TimeInterval) async throws
+}
+
+extension AccessibilitySystemProviding {
+    func enableEnhancedAccessibility(processIdentifier: pid_t) throws {}
 }
 
 @MainActor
@@ -35,7 +44,9 @@ final class AccessibilityClient: FocusedInputControlling {
         case accessibilityTreeTruncated
         case frontmostTargetUnavailable
         case focusedElementUnavailable
+        case ambiguousChatInput
         case targetChanged
+        case composerValueChanged
         case textInsertionFailed
         case insertedValueMismatch
         case returnDeliveryFailed
@@ -52,8 +63,12 @@ final class AccessibilityClient: FocusedInputControlling {
                 "找不到当前前台应用"
             case .focusedElementUnavailable:
                 "找不到当前光标输入框"
+            case .ambiguousChatInput:
+                "当前窗口有多个可能的聊天输入框"
             case .targetChanged:
                 "当前应用、窗口或光标已经变化"
+            case .composerValueChanged:
+                "聊天输入框内容刚刚发生变化"
             case .textInsertionFailed:
                 "无法在当前聊天输入框写入文字"
             case .insertedValueMismatch:
@@ -106,6 +121,8 @@ final class AccessibilityClient: FocusedInputControlling {
     static let maximumNearbyAncestorDepth = 4
     static let maximumNearbyTraversalDepth = 3
     static let maximumNearbyElementCount = 128
+    static let enhancedAccessibilityPollInterval: TimeInterval = 0.1
+    static let enhancedAccessibilityTimeout: TimeInterval = 2
     static let codexBundleIdentifier = "com.openai.codex"
     static let editableInputRoles = Set([
         kAXTextAreaRole as String,
@@ -114,6 +131,13 @@ final class AccessibilityClient: FocusedInputControlling {
 
     private let system: any AccessibilitySystemProviding
     private let pollInterval: TimeInterval
+    private var preparedCaptureLock: PreparedCaptureLock?
+
+    private struct PreparedCaptureLock {
+        let processIdentifier: pid_t
+        let bundleIdentifier: String
+        let window: AnyObject
+    }
 
     convenience init() {
         self.init(system: SystemAccessibilityProvider())
@@ -127,7 +151,72 @@ final class AccessibilityClient: FocusedInputControlling {
         self.pollInterval = max(0.001, pollInterval)
     }
 
+    func prepareTargetCapture() async throws {
+        preparedCaptureLock = nil
+        guard system.isProcessTrusted else {
+            throw AXError.permissionMissing
+        }
+        guard let pid = system.frontmostPID,
+              pid > 0,
+              system.frontmostBundleIdentifier == Self.codexBundleIdentifier
+        else {
+            return
+        }
+
+        let lockedWindow = try system.focusedWindow(processIdentifier: pid)
+        guard try system.processIdentifier(of: lockedWindow) == pid else {
+            throw AXError.targetChanged
+        }
+        let captureLock = PreparedCaptureLock(
+            processIdentifier: pid,
+            bundleIdentifier: Self.codexBundleIdentifier,
+            window: lockedWindow
+        )
+        var prepared = false
+        defer {
+            if !prepared {
+                preparedCaptureLock = nil
+            }
+        }
+        try system.enableEnhancedAccessibility(processIdentifier: pid)
+        let maximumSleeps = Int(
+            ceil(
+                Self.enhancedAccessibilityTimeout
+                    / Self.enhancedAccessibilityPollInterval
+            )
+        )
+        for attempt in 0...maximumSleeps {
+            guard system.frontmostPID == pid,
+                  system.frontmostBundleIdentifier == Self.codexBundleIdentifier
+            else {
+                throw AXError.targetChanged
+            }
+            let currentWindow = try system.focusedWindow(processIdentifier: pid)
+            guard system.elementsAreEqual(currentWindow, lockedWindow) else {
+                throw AXError.targetChanged
+            }
+            if try accessibilityTreeContainsCodexChatInput(
+                processIdentifier: pid,
+                window: lockedWindow
+            ) {
+                preparedCaptureLock = captureLock
+                prepared = true
+                return
+            }
+            guard attempt < maximumSleeps else {
+                preparedCaptureLock = captureLock
+                prepared = true
+                return
+            }
+            try await system.sleep(
+                for: Self.enhancedAccessibilityPollInterval
+            )
+        }
+    }
+
     func captureTarget() throws -> FocusedTargetSnapshot {
+        let captureLock = preparedCaptureLock
+        defer { preparedCaptureLock = nil }
         guard system.isProcessTrusted else {
             throw AXError.permissionMissing
         }
@@ -140,6 +229,14 @@ final class AccessibilityClient: FocusedInputControlling {
         }
 
         let window = try system.focusedWindow(processIdentifier: pid)
+        if let captureLock {
+            guard pid == captureLock.processIdentifier,
+                  bundleIdentifier == captureLock.bundleIdentifier,
+                  system.elementsAreEqual(window, captureLock.window)
+            else {
+                throw AXError.targetChanged
+            }
+        }
         let captured = try captureElement(
             processIdentifier: pid,
             bundleIdentifier: bundleIdentifier,
@@ -217,10 +314,15 @@ final class AccessibilityClient: FocusedInputControlling {
 
     func setComposerValue(
         _ value: String,
+        expectedCurrentValue: String,
         in target: FocusedTargetSnapshot
     ) throws {
         try revalidate(target)
-        try system.setComposerValue(value, on: target.element)
+        try system.setComposerValue(
+            value,
+            expectedCurrentValue: expectedCurrentValue,
+            on: target.element
+        )
         target.consumeEquivalentFocusReplacementAllowance()
     }
 
@@ -409,7 +511,7 @@ final class AccessibilityClient: FocusedInputControlling {
         }
 
         return (
-            try focusFirstEditableInput(
+            try focusUniqueCodexChatInput(
                 processIdentifier: processIdentifier,
                 bundleIdentifier: bundleIdentifier,
                 window: window
@@ -432,36 +534,88 @@ final class AccessibilityClient: FocusedInputControlling {
             && Self.editableInputRoles.contains(summary.role ?? "")
     }
 
-    private func focusFirstEditableInput(
+    private func focusUniqueCodexChatInput(
         processIdentifier: pid_t,
         bundleIdentifier: String,
         window: AnyObject
     ) throws -> AnyObject {
+        let candidates = try codexChatInputCandidates(
+            processIdentifier: processIdentifier,
+            window: window,
+            stopAfter: 2
+        )
+        guard candidates.count == 1, let candidate = candidates.first else {
+            if candidates.count > 1 {
+                throw AXError.ambiguousChatInput
+            }
+            throw AXError.focusedElementUnavailable
+        }
+        try system.setFocusedElement(candidate)
+        return try confirmAutoFocusedElement(
+            candidate,
+            processIdentifier: processIdentifier,
+            bundleIdentifier: bundleIdentifier,
+            window: window
+        )
+    }
+
+    private func accessibilityTreeContainsCodexChatInput(
+        processIdentifier: pid_t,
+        window: AnyObject
+    ) throws -> Bool {
+        try !codexChatInputCandidates(
+            processIdentifier: processIdentifier,
+            window: window,
+            stopAfter: 1
+        ).isEmpty
+    }
+
+    private func codexChatInputCandidates(
+        processIdentifier: pid_t,
+        window: AnyObject,
+        stopAfter: Int
+    ) throws -> [AnyObject] {
         var queue = try system.children(of: window)
         var offset = 0
-
+        var matches: [AnyObject] = []
         while offset < queue.count {
             guard offset < Self.maximumFocusedElementScanCount else {
                 throw AXError.accessibilityTreeTruncated
             }
             let candidate = queue[offset]
             offset += 1
-
             if try isEditableInput(
                 candidate,
                 expectedProcessIdentifier: processIdentifier
             ) {
-                try system.setFocusedElement(candidate)
-                return try confirmAutoFocusedElement(
-                    candidate,
-                    processIdentifier: processIdentifier,
-                    bundleIdentifier: bundleIdentifier,
-                    window: window
+                let context = try makeContext(
+                    focused: candidate,
+                    window: window,
+                    expectedPID: processIdentifier
                 )
+                let isolatedContext = FocusedChatContext(
+                    focused: context.focused,
+                    ancestors: context.ancestors,
+                    nearby: context.nearby.filter {
+                        !($0.enabled
+                            && $0.valueSettable
+                            && Self.editableInputRoles.contains($0.role ?? ""))
+                    }
+                )
+                do {
+                    _ = try ChatTargetClassifier().classify(
+                        bundleIdentifier: Self.codexBundleIdentifier,
+                        context: isolatedContext
+                    )
+                    matches.append(candidate)
+                    if matches.count >= stopAfter { return matches }
+                } catch is ChatTargetClassificationError {
+                    // Continue scanning; this editable element is not a chat composer.
+                }
             }
             queue.append(contentsOf: try system.children(of: candidate))
         }
-        throw AXError.focusedElementUnavailable
+        return matches
     }
 
     private func confirmAutoFocusedElement(
@@ -628,6 +782,28 @@ private final class SystemAccessibilityProvider: AccessibilitySystemProviding {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier
     }
 
+    func enableEnhancedAccessibility(processIdentifier: pid_t) throws {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        let attribute = "AXEnhancedUserInterface" as CFString
+        var current: CFTypeRef?
+        let readResult = AXUIElementCopyAttributeValue(
+            application,
+            attribute,
+            &current
+        )
+        if readResult == .success, current as? Bool == true {
+            return
+        }
+        let setResult = AXUIElementSetAttributeValue(
+            application,
+            attribute,
+            kCFBooleanTrue
+        )
+        guard setResult == .success || setResult == .cannotComplete else {
+            throw AccessibilityClient.AXError.focusedElementUnavailable
+        }
+    }
+
     func focusedWindow(processIdentifier: pid_t) throws -> AnyObject {
         let application = AXUIElementCreateApplication(processIdentifier)
         var value: CFTypeRef?
@@ -773,8 +949,15 @@ private final class SystemAccessibilityProvider: AccessibilitySystemProviding {
         )
     }
 
-    func setComposerValue(_ value: String, on element: AnyObject) throws {
+    func setComposerValue(
+        _ value: String,
+        expectedCurrentValue: String,
+        on element: AnyObject
+    ) throws {
         let element = axElement(element)
+        guard try composerValue(of: element) == expectedCurrentValue else {
+            throw AccessibilityClient.AXError.composerValueChanged
+        }
         var pid: pid_t = 0
         guard AXUIElementGetPid(element, &pid) == .success,
               pid > 0,
@@ -783,27 +966,26 @@ private final class SystemAccessibilityProvider: AccessibilitySystemProviding {
                   kAXFocusedAttribute as CFString,
                   kCFBooleanTrue
               ) == .success,
-              let source = CGEventSource(stateID: .hidSystemState),
-              let selectAllDown = CGEvent(
-                  keyboardEventSource: source,
-                  virtualKey: 0,
-                  keyDown: true
-              ),
-              let selectAllUp = CGEvent(
-                  keyboardEventSource: source,
-                  virtualKey: 0,
-                  keyDown: false
-              )
+              let source = CGEventSource(stateID: .hidSystemState)
         else {
             throw AccessibilityClient.AXError.textInsertionFailed
         }
-        selectAllDown.flags = .maskCommand
-        selectAllUp.flags = .maskCommand
-        selectAllDown.postToPid(pid)
-        selectAllUp.postToPid(pid)
+        guard try composerValue(of: element) == expectedCurrentValue else {
+            throw AccessibilityClient.AXError.composerValueChanged
+        }
 
         if value.isEmpty {
-            guard let deleteDown = CGEvent(
+            guard let selectAllDown = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: 0,
+                keyDown: true
+            ),
+                let selectAllUp = CGEvent(
+                    keyboardEventSource: source,
+                    virtualKey: 0,
+                    keyDown: false
+                ),
+                let deleteDown = CGEvent(
                 keyboardEventSource: source,
                 virtualKey: 51,
                 keyDown: true
@@ -816,6 +998,10 @@ private final class SystemAccessibilityProvider: AccessibilitySystemProviding {
             else {
                 throw AccessibilityClient.AXError.textInsertionFailed
             }
+            selectAllDown.flags = .maskCommand
+            selectAllUp.flags = .maskCommand
+            selectAllDown.postToPid(pid)
+            selectAllUp.postToPid(pid)
             deleteDown.postToPid(pid)
             deleteUp.postToPid(pid)
             return

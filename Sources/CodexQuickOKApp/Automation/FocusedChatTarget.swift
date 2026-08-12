@@ -114,11 +114,13 @@ final class FocusedTargetSnapshot {
 
 @MainActor
 protocol FocusedInputControlling: AnyObject {
+    func prepareTargetCapture() async throws
     func captureTarget() throws -> FocusedTargetSnapshot
     func revalidate(_ target: FocusedTargetSnapshot) throws
     func composerValue(in target: FocusedTargetSnapshot) throws -> String
     func setComposerValue(
         _ value: String,
+        expectedCurrentValue: String,
         in target: FocusedTargetSnapshot
     ) throws
     func waitUntilComposerValue(
@@ -127,4 +129,8 @@ protocol FocusedInputControlling: AnyObject {
         timeout: TimeInterval
     ) async throws
     func pressReturn(in target: FocusedTargetSnapshot) throws
+}
+
+extension FocusedInputControlling {
+    func prepareTargetCapture() async throws {}
 }

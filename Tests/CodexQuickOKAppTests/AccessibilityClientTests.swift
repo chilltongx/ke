@@ -268,7 +268,11 @@ final class AccessibilityClientTests: XCTestCase {
         let client = AccessibilityClient(system: system, pollInterval: 0.01)
         let target = try client.captureTarget()
 
-        try client.setComposerValue("可", in: target)
+        try client.setComposerValue(
+            "可",
+            expectedCurrentValue: "",
+            in: target
+        )
         try await client.waitUntilComposerValue("可", in: target, timeout: 0.02)
         try client.pressReturn(in: target)
 
@@ -282,7 +286,11 @@ final class AccessibilityClientTests: XCTestCase {
         let client = AccessibilityClient(system: system, pollInterval: 0.01)
         let target = try client.captureTarget()
 
-        try client.setComposerValue("可", in: target)
+        try client.setComposerValue(
+            "可",
+            expectedCurrentValue: "",
+            in: target
+        )
         do {
             try await client.waitUntilComposerValue(
                 "可",
@@ -299,6 +307,28 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertEqual(system.returnPIDs, [])
     }
 
+    func testWriteBoundaryValueChangePreservesDraftAndNeverWrites() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 861)
+        let client = AccessibilityClient(system: system)
+        let target = try client.captureTarget()
+        system.valueBeforeWriteValidation = "last moment draft"
+
+        XCTAssertThrowsError(
+            try client.setComposerValue(
+                "可",
+                expectedCurrentValue: "",
+                in: target
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .composerValueChanged
+            )
+        }
+        XCTAssertEqual(system.storedComposerValue, "last moment draft")
+        XCTAssertEqual(system.returnPIDs, [])
+    }
+
     func testCodexAutoFocusesComposerWhenNoElementIsFocused() throws {
         let system = FakeAccessibilitySystem.validConversation(pid: 870)
         system.focusedElementNode = nil
@@ -311,6 +341,50 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertTrue(system.focusAttempts[0] === system.composer)
     }
 
+    func testPreparesCollapsedCodexAccessibilityTreeBeforeCapture() async throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 869)
+        system.collapseWindowAccessibilityTree()
+        system.afterSleep = {
+            system.restoreWindowAccessibilityTree()
+        }
+        let client = AccessibilityClient(system: system)
+
+        try await client.prepareTargetCapture()
+        let target = try client.captureTarget()
+
+        XCTAssertEqual(system.enhancedAccessibilityRequests, [869])
+        XCTAssertEqual(system.sleepCount, 1)
+        XCTAssertTrue(system.elementsAreEqual(target.element, system.composer))
+    }
+
+    func testPreparationRejectsSameProcessWindowChangeWhileWaiting() async {
+        let system = FakeAccessibilitySystem.validConversation(pid: 8691)
+        system.collapseWindowAccessibilityTree()
+        system.afterSleep = {
+            system.focusedWindowNode = system.alternateWindow
+        }
+        let client = AccessibilityClient(system: system)
+
+        do {
+            try await client.prepareTargetCapture()
+            XCTFail("Expected the prepared window lock to reject the change")
+        } catch {
+            XCTAssertEqual(error as? AccessibilityClient.AXError, .targetChanged)
+        }
+    }
+
+    func testCaptureRejectsWindowChangeAfterPreparation() async throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 8692)
+        let client = AccessibilityClient(system: system)
+
+        try await client.prepareTargetCapture()
+        system.focusedWindowNode = system.alternateWindow
+
+        XCTAssertThrowsError(try client.captureTarget()) { error in
+            XCTAssertEqual(error as? AccessibilityClient.AXError, .targetChanged)
+        }
+    }
+
     func testCodexAutoFocusesComposerWhenButtonOwnsFocus() throws {
         let system = FakeAccessibilitySystem.validConversation(pid: 871)
         system.focusedElementNode = system.sendButton
@@ -321,17 +395,33 @@ final class AccessibilityClientTests: XCTestCase {
         XCTAssertTrue(system.focusAttempts.first === system.composer)
     }
 
-    func testCodexAutoFocusUsesFirstEditableInputInTraversalOrder() throws {
+    func testCodexAutoFocusRejectsMultiplePlausibleInputs() {
         let system = FakeAccessibilitySystem.validConversation(pid: 872)
-        let firstInput = system.addEditableInputBeforeComposer(
+        _ = system.addEditableInputBeforeComposer(
             title: "Unlabeled input"
         )
         system.focusedElementNode = nil
 
+        XCTAssertThrowsError(
+            try AccessibilityClient(system: system).captureTarget()
+        ) { error in
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .ambiguousChatInput
+            )
+        }
+        XCTAssertTrue(system.focusAttempts.isEmpty)
+    }
+
+    func testCodexAutoFocusSkipsSearchAndUsesUniqueComposer() throws {
+        let system = FakeAccessibilitySystem.validConversation(pid: 8721)
+        _ = system.addEditableInputBeforeComposer(title: "Search")
+        system.focusedElementNode = nil
+
         let target = try AccessibilityClient(system: system).captureTarget()
 
-        XCTAssertTrue(system.elementsAreEqual(target.element, firstInput))
-        XCTAssertTrue(system.focusAttempts.first === firstInput)
+        XCTAssertTrue(system.elementsAreEqual(target.element, system.composer))
+        XCTAssertTrue(system.focusAttempts.first === system.composer)
     }
 
     func testExistingEditableFocusIsNeverReplaced() throws {
@@ -467,7 +557,11 @@ final class AccessibilityClientTests: XCTestCase {
         system.focusedElementNode = system.sendButton
         let client = AccessibilityClient(system: system)
         let target = try client.captureTarget()
-        try client.setComposerValue("可", in: target)
+        try client.setComposerValue(
+            "可",
+            expectedCurrentValue: "",
+            in: target
+        )
         _ = system.replaceComposerWithEquivalentNode()
 
         assertTargetChanged { try client.revalidate(target) }
@@ -522,9 +616,12 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
     var focusError: Error?
     var ignoreFocusAssignment = false
     var afterFocusAttempt: (() -> Void)?
+    var afterSleep: (() -> Void)?
+    var valueBeforeWriteValidation: String?
     private(set) var returnPIDs: [pid_t] = []
     private(set) var sleepCount = 0
     private(set) var focusAttempts: [Node] = []
+    private(set) var enhancedAccessibilityRequests: [pid_t] = []
 
     let root = Node()
     let alternateWindow = Node()
@@ -582,6 +679,10 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
         system.composer.parent = system.main
         system.sendButton.parent = system.main
         return system
+    }
+
+    func enableEnhancedAccessibility(processIdentifier: pid_t) throws {
+        enhancedAccessibilityRequests.append(processIdentifier)
     }
 
     func focusedWindow(processIdentifier: pid_t) throws -> AnyObject {
@@ -660,7 +761,18 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
         storedComposerValue
     }
 
-    func setComposerValue(_ value: String, on element: AnyObject) throws {
+    func setComposerValue(
+        _ value: String,
+        expectedCurrentValue: String,
+        on element: AnyObject
+    ) throws {
+        if let valueBeforeWriteValidation {
+            storedComposerValue = valueBeforeWriteValidation
+            self.valueBeforeWriteValidation = nil
+        }
+        guard storedComposerValue == expectedCurrentValue else {
+            throw AccessibilityClient.AXError.composerValueChanged
+        }
         if !ignoreComposerWrites {
             storedComposerValue = value
         }
@@ -672,6 +784,16 @@ private final class FakeAccessibilitySystem: AccessibilitySystemProviding {
 
     func sleep(for interval: TimeInterval) async throws {
         sleepCount += 1
+        afterSleep?()
+        afterSleep = nil
+    }
+
+    func collapseWindowAccessibilityTree() {
+        childrenByNode[ObjectIdentifier(root)] = []
+    }
+
+    func restoreWindowAccessibilityTree() {
+        childrenByNode[ObjectIdentifier(root)] = [main]
     }
 
     func nestSendButtonBesideComposer() {

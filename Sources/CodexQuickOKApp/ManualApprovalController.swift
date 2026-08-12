@@ -16,6 +16,7 @@ final class ManualApprovalController {
     private var attemptID: UInt64 = 0
     private var attentionRequired = false
     private var isVisible = false
+    private var pendingTerminalOutcomes: [CodexTerminalOutcome] = []
 
     init(panel: any CompanionPanel, sender: any CurrentApprovalSending) {
         self.panel = panel
@@ -31,6 +32,11 @@ final class ManualApprovalController {
     func show() {
         isVisible = true
         panel.show(mode: attentionRequired ? .waiting : .running)
+        let pendingTerminalOutcomes = pendingTerminalOutcomes
+        self.pendingTerminalOutcomes.removeAll()
+        for outcome in pendingTerminalOutcomes {
+            panel.showTaskTerminal(outcome)
+        }
     }
 
     func setAttentionRequired(_ required: Bool) {
@@ -40,10 +46,19 @@ final class ManualApprovalController {
         panel.show(mode: required ? .waiting : .running)
     }
 
+    func showTaskTerminal(_ outcome: CodexTerminalOutcome) {
+        guard isVisible else {
+            pendingTerminalOutcomes.append(outcome)
+            return
+        }
+        panel.showTaskTerminal(outcome)
+    }
+
     func stop() {
         attemptID &+= 1
         sendTask?.cancel()
         isVisible = false
+        pendingTerminalOutcomes.removeAll()
         panel.setSending(false)
         panel.hide()
     }

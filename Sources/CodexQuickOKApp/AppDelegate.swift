@@ -33,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ) -> Void
     private let focusRestoreTargetProvider: () -> pid_t?
     private let restoreApplicationActivation: @MainActor (pid_t) -> Void
+    private let terminalMonitoringStartedAt: Int
     private var activationRestoreTargetProcessIdentifier: pid_t?
     private var panel: (any CompanionPanel)?
     private var controller: ManualApprovalController?
@@ -48,6 +49,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var shutdownFinished = false
     private var connectionEpoch: UInt64 = 0
     private var quotaRequestGeneration: UInt64 = 0
+    private var hasPrimedTerminalTurns = false
+    private var seenTerminalTurnIDs: Set<TerminalTurnID> = []
+
+    private struct TerminalTurnID: Hashable {
+        let threadID: String
+        let turnID: String
+    }
 
     private(set) var isShuttingDown = false
 
@@ -91,6 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         },
         initialActivationRestoreTargetProcessIdentifier: pid_t? = nil,
         focusRestoreTargetProvider: @escaping () -> pid_t? = { nil },
+        terminalMonitoringStartedAt: Int = Int(Date().timeIntervalSince1970),
         restoreApplicationActivation: @escaping @MainActor (pid_t) -> Void = {
             let restored = NSRunningApplication(processIdentifier: $0)?.activate(
                 options: [.activateAllWindows]
@@ -108,6 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.reconnectSleep = reconnectSleep
         self.scheduleActivationRestoration = scheduleActivationRestoration
         self.focusRestoreTargetProvider = focusRestoreTargetProvider
+        self.terminalMonitoringStartedAt = terminalMonitoringStartedAt
         self.restoreApplicationActivation = restoreApplicationActivation
         self.activationRestoreTargetProcessIdentifier =
             initialActivationRestoreTargetProcessIdentifier
@@ -399,6 +409,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshTaskAttention(connectionEpoch: connectionEpoch)
     }
 
+    func applyRecentTaskSnapshot(_ snapshot: CodexRecentTaskSnapshot) {
+        controller?.setAttentionRequired(snapshot.attention != nil)
+        publishNewTerminalTurns(from: snapshot)
+    }
+
     private func refreshTaskAttention(connectionEpoch epoch: UInt64) {
         guard isCurrentConnection(epoch), isAppServerStarted, attentionTask == nil else {
             return
@@ -407,14 +422,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             defer { attentionTask = nil }
             do {
-                let attention = try await appServer.readRecentTaskAttention()
+                let snapshot = try await appServer.readRecentTaskSnapshot()
                 guard isCurrentConnection(epoch), !Task.isCancelled else { return }
-                controller?.setAttentionRequired(attention != nil)
+                applyRecentTaskSnapshot(snapshot)
             } catch {
                 // Attention is best-effort. Quota polling owns connection recovery,
                 // so an older Codex without thread/read support does not restart-loop.
             }
         }
+    }
+
+    private func publishNewTerminalTurns(from snapshot: CodexRecentTaskSnapshot) {
+        let currentIDs = snapshot.terminalTurns.map {
+            TerminalTurnID(threadID: $0.threadID, turnID: $0.turnID)
+        }
+        guard hasPrimedTerminalTurns else {
+            hasPrimedTerminalTurns = true
+            rememberTerminalTurnIDs(currentIDs)
+            for turn in snapshot.terminalTurns
+                where turn.completedAt >= terminalMonitoringStartedAt {
+                controller?.showTaskTerminal(turn.outcome)
+            }
+            return
+        }
+
+        for (turn, identifier) in zip(snapshot.terminalTurns, currentIDs) {
+            guard seenTerminalTurnIDs.insert(identifier).inserted else { continue }
+            guard turn.completedAt >= terminalMonitoringStartedAt else { continue }
+            controller?.showTaskTerminal(turn.outcome)
+        }
+    }
+
+    private func rememberTerminalTurnIDs(_ identifiers: [TerminalTurnID]) {
+        seenTerminalTurnIDs.formUnion(identifiers)
     }
 
     private func refreshQuota(connectionEpoch epoch: UInt64) {

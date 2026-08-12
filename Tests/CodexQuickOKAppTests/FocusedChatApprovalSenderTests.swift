@@ -16,6 +16,7 @@ final class FocusedChatApprovalSenderTests: XCTestCase {
         try await sender.sendOK()
 
         XCTAssertEqual(input.events, [
+            "prepare",
             "capture",
             "read",
             "revalidate",
@@ -28,7 +29,7 @@ final class FocusedChatApprovalSenderTests: XCTestCase {
         XCTAssertEqual(input.returnCount, 1)
     }
 
-    func testWhitespaceOnlyComposerIsAccepted() async throws {
+    func testWhitespaceOnlyComposerIsRejectedWithoutWrite() async {
         for value in [" ", "\n\t"] {
             let input = FakeFocusedInput(value: value)
             let sender = FocusedChatApprovalSender(
@@ -36,9 +37,14 @@ final class FocusedChatApprovalSenderTests: XCTestCase {
                 classifier: StubChatClassifier(match: .init(kind: .generic))
             )
 
-            try await sender.sendOK()
-
-            XCTAssertEqual(input.returnCount, 1)
+            do {
+                try await sender.sendOK()
+                XCTFail("Expected whitespace draft rejection")
+            } catch {
+                XCTAssertEqual(error as? FocusedChatSendError, .existingDraft)
+            }
+            XCTAssertFalse(input.events.contains { $0.hasPrefix("write:") })
+            XCTAssertEqual(input.returnCount, 0)
         }
     }
 
@@ -91,7 +97,7 @@ final class FocusedChatApprovalSenderTests: XCTestCase {
             XCTFail("Expected classification rejection")
         } catch {}
 
-        XCTAssertEqual(input.events, ["capture"])
+        XCTAssertEqual(input.events, ["prepare", "capture"])
         XCTAssertEqual(input.returnCount, 0)
     }
 
@@ -128,6 +134,29 @@ final class FocusedChatApprovalSenderTests: XCTestCase {
             XCTAssertEqual(error as? FocusedChatSendError, .existingDraft)
         }
 
+        XCTAssertFalse(input.events.contains { $0.hasPrefix("write:") })
+        XCTAssertEqual(input.returnCount, 0)
+    }
+
+    func testDraftAppearingAtWriteBoundaryIsNotOverwritten() async {
+        let input = FakeFocusedInput(value: "")
+        input.valueBeforeWriteValidation = "last moment draft"
+        let sender = FocusedChatApprovalSender(
+            input: input,
+            classifier: StubChatClassifier(match: .init(kind: .generic))
+        )
+
+        do {
+            try await sender.sendOK()
+            XCTFail("Expected write-boundary draft rejection")
+        } catch {
+            XCTAssertEqual(
+                error as? AccessibilityClient.AXError,
+                .composerValueChanged
+            )
+        }
+
+        XCTAssertEqual(input.value, "last moment draft")
         XCTAssertFalse(input.events.contains { $0.hasPrefix("write:") })
         XCTAssertEqual(input.returnCount, 0)
     }
@@ -221,12 +250,17 @@ private final class FakeFocusedInput: FocusedInputControlling {
     var returnError: Error?
     var waitGate: (() async throws -> Void)?
     var valueAfterFirstRevalidation: String?
+    var valueBeforeWriteValidation: String?
     private(set) var returnAttempts = 0
     private(set) var returnCount = 0
     private var revalidationCount = 0
 
     init(value: String) {
         self.value = value
+    }
+
+    func prepareTargetCapture() async throws {
+        events.append("prepare")
     }
 
     func captureTarget() throws -> FocusedTargetSnapshot {
@@ -269,8 +303,16 @@ private final class FakeFocusedInput: FocusedInputControlling {
 
     func setComposerValue(
         _ value: String,
+        expectedCurrentValue: String,
         in target: FocusedTargetSnapshot
     ) throws {
+        if let valueBeforeWriteValidation {
+            self.value = valueBeforeWriteValidation
+            self.valueBeforeWriteValidation = nil
+        }
+        guard self.value == expectedCurrentValue else {
+            throw AccessibilityClient.AXError.composerValueChanged
+        }
         events.append("write:\(value)")
         self.value = value
     }

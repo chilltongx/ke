@@ -34,6 +34,29 @@ final class CodexTaskAttentionParserTests: XCTestCase {
         XCTAssertNil(CodexTaskAttentionParser.attention(from: superseded, summary: summary))
     }
 
+    func testCollectsCompletedAndInterruptedTurnsOnly() throws {
+        let response = try decode(#"{"thread":{"turns":[{"id":"done","status":"completed","completedAt":10,"items":[]},{"id":"stopped","status":"interrupted","completedAt":20,"items":[]},{"id":"failed","status":"failed","completedAt":30,"items":[]},{"id":"active","status":"inProgress","items":[]}]}}"#)
+        let summary = CodexThreadSummary(threadID: "thread-1", updatedAt: 40)
+
+        XCTAssertEqual(
+            CodexTaskAttentionParser.terminalTurns(from: response, summary: summary),
+            [
+                CodexTerminalTurn(
+                    threadID: "thread-1",
+                    turnID: "done",
+                    outcome: .completed,
+                    completedAt: 10
+                ),
+                CodexTerminalTurn(
+                    threadID: "thread-1",
+                    turnID: "stopped",
+                    outcome: .interrupted,
+                    completedAt: 20
+                ),
+            ]
+        )
+    }
+
     private func decode(_ source: String) throws -> JSONValue {
         try JSONDecoder().decode(JSONValue.self, from: Data(source.utf8))
     }
