@@ -24,6 +24,8 @@ actor CodexAppServerClient {
         let updatedAt: Int
         let attention: CodexTaskAttention?
         let terminalTurns: [CodexTerminalTurn]
+        let hasInProgressTurn: Bool
+        let needsStableRead: Bool
     }
 
     init(
@@ -103,7 +105,13 @@ actor CodexAppServerClient {
         }
 
         for summary in summaries {
-            if attentionCache[summary.threadID]?.updatedAt == summary.updatedAt {
+            let cached = attentionCache[summary.threadID]
+            let updatedAtChanged = cached?.updatedAt != summary.updatedAt
+            if let cached,
+               !updatedAtChanged,
+               !cached.hasInProgressTurn,
+               !cached.needsStableRead
+            {
                 continue
             }
             let detail = try await rpc.request(
@@ -122,7 +130,11 @@ actor CodexAppServerClient {
                 terminalTurns: CodexTaskAttentionParser.terminalTurns(
                     from: detail,
                     summary: summary
-                )
+                ),
+                hasInProgressTurn: CodexTaskAttentionParser.hasInProgressTurn(
+                    in: detail
+                ),
+                needsStableRead: updatedAtChanged
             )
         }
 
@@ -344,6 +356,16 @@ enum CodexTaskAttentionParser {
                 outcome: outcome,
                 completedAt: turn["completedAt"]?.integerValue ?? summary.updatedAt
             )
+        }
+    }
+
+    static func hasInProgressTurn(in response: JSONValue) -> Bool {
+        guard let thread = response.objectValue?["thread"]?.objectValue,
+              let turns = thread["turns"]?.arrayValue
+        else { return false }
+
+        return turns.contains { turn in
+            turn.objectValue?["status"]?.stringValue == "inProgress"
         }
     }
 }

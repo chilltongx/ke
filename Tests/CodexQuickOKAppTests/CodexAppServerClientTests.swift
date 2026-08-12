@@ -164,6 +164,151 @@ final class CodexAppServerClientLifecycleTests: XCTestCase {
 
 }
 
+final class CodexAppServerClientSnapshotCacheTests: XCTestCase {
+    func testRereadsWhenInProgressCompletesWithoutUpdatedAtChange() async throws {
+        let updatedAt = Int(Date().timeIntervalSince1970)
+        let server = SnapshotRPCServer(
+            listResults: [Self.listResult(updatedAt: updatedAt)],
+            detailResults: [
+                Self.detailResult(status: "inProgress", completedAt: nil),
+                Self.detailResult(status: "completed", completedAt: updatedAt),
+            ]
+        )
+        let (client, serverTask) = try await Self.startClient(server: server)
+
+        let inProgress = try await client.readRecentTaskSnapshot()
+        XCTAssertEqual(inProgress.terminalTurns, [])
+
+        let completed = try await client.readRecentTaskSnapshot()
+        XCTAssertEqual(
+            completed.terminalTurns,
+            [
+                CodexTerminalTurn(
+                    threadID: "thread-1",
+                    turnID: "turn-1",
+                    outcome: .completed,
+                    completedAt: updatedAt
+                )
+            ]
+        )
+        let counts = server.requestCounts
+        XCTAssertEqual(counts.threadReads, 2)
+
+        await client.stop()
+        await serverTask.value
+    }
+
+    func testRereadsEveryPollWhileTurnRemainsInProgress() async throws {
+        let updatedAt = Int(Date().timeIntervalSince1970)
+        let server = SnapshotRPCServer(
+            listResults: [Self.listResult(updatedAt: updatedAt)],
+            detailResults: [Self.detailResult(status: "inProgress", completedAt: nil)]
+        )
+        let (client, serverTask) = try await Self.startClient(server: server)
+
+        for _ in 0..<3 {
+            let snapshot = try await client.readRecentTaskSnapshot()
+            XCTAssertEqual(snapshot.terminalTurns, [])
+        }
+        let counts = server.requestCounts
+        XCTAssertEqual(counts.threadReads, 3)
+
+        await client.stop()
+        await serverTask.value
+    }
+
+    func testStopsRereadingAfterTerminalStateIsStable() async throws {
+        let updatedAt = Int(Date().timeIntervalSince1970)
+        let terminal = Self.detailResult(status: "completed", completedAt: updatedAt)
+        let server = SnapshotRPCServer(
+            listResults: [Self.listResult(updatedAt: updatedAt)],
+            detailResults: [terminal]
+        )
+        let (client, serverTask) = try await Self.startClient(server: server)
+
+        for _ in 0..<3 {
+            _ = try await client.readRecentTaskSnapshot()
+        }
+        let counts = server.requestCounts
+        XCTAssertEqual(counts.threadReads, 2)
+
+        await client.stop()
+        await serverTask.value
+    }
+
+    func testChangedUpdatedAtGetsAnExtraStableRead() async throws {
+        let updatedAt = Int(Date().timeIntervalSince1970)
+        let changedUpdatedAt = updatedAt + 1
+        let server = SnapshotRPCServer(
+            listResults: [
+                Self.listResult(updatedAt: updatedAt),
+                Self.listResult(updatedAt: updatedAt),
+                Self.listResult(updatedAt: changedUpdatedAt),
+                Self.listResult(updatedAt: changedUpdatedAt),
+                Self.listResult(updatedAt: changedUpdatedAt),
+            ],
+            detailResults: [
+                Self.detailResult(status: "completed", completedAt: updatedAt),
+                Self.detailResult(status: "completed", completedAt: updatedAt),
+                Self.detailResult(status: "completed", completedAt: changedUpdatedAt),
+                Self.detailResult(status: "completed", completedAt: changedUpdatedAt),
+            ]
+        )
+        let (client, serverTask) = try await Self.startClient(server: server)
+
+        for _ in 0..<5 {
+            _ = try await client.readRecentTaskSnapshot()
+        }
+        let counts = server.requestCounts
+        XCTAssertEqual(counts.threadReads, 4)
+
+        await client.stop()
+        await serverTask.value
+    }
+
+    private static func startClient(
+        server: SnapshotRPCServer
+    ) async throws -> (CodexAppServerClient, Task<Void, Never>) {
+        let process = RecordingProcess()
+        let serverTask = Task.detached {
+            server.run(
+                requests: process.outputReader,
+                responses: process.inputWriter
+            )
+        }
+        let client = CodexAppServerClient(processStarter: { _ in process })
+        try await client.start(codexBinary: URL(fileURLWithPath: "/tmp/codex"))
+        return (client, serverTask)
+    }
+
+    private static func listResult(updatedAt: Int) -> JSONValue {
+        .object([
+            "data": .array([
+                .object([
+                    "id": .string("thread-1"),
+                    "updatedAt": .integer(updatedAt),
+                ])
+            ])
+        ])
+    }
+
+    private static func detailResult(status: String, completedAt: Int?) -> JSONValue {
+        var turn: [String: JSONValue] = [
+            "id": .string("turn-1"),
+            "status": .string(status),
+            "items": .array([]),
+        ]
+        if let completedAt {
+            turn["completedAt"] = .integer(completedAt)
+        }
+        return .object([
+            "thread": .object([
+                "turns": .array([.object(turn)])
+            ])
+        ])
+    }
+}
+
 private final class RecordingProcess: AppServerProcess, @unchecked Sendable {
     private let lock = NSLock()
     private var storedEvents: [String] = []
@@ -235,5 +380,72 @@ private actor CounterBox {
 
     func increment() {
         value += 1
+    }
+}
+
+private final class SnapshotRPCServer: @unchecked Sendable {
+    private let lock = NSLock()
+    private let listResults: [JSONValue]
+    private let detailResults: [JSONValue]
+    private var listIndex = 0
+    private var detailIndex = 0
+
+    init(listResults: [JSONValue], detailResults: [JSONValue]) {
+        precondition(!listResults.isEmpty)
+        precondition(!detailResults.isEmpty)
+        self.listResults = listResults
+        self.detailResults = detailResults
+    }
+
+    var requestCounts: (threadLists: Int, threadReads: Int) {
+        lock.withLock { (listIndex, detailIndex) }
+    }
+
+    func run(requests: FileHandle, responses: FileHandle) {
+        var buffered = Data()
+        do {
+            while true {
+                let data = requests.availableData
+                guard !data.isEmpty else { return }
+                buffered.append(data)
+                while let newline = buffered.firstIndex(of: 0x0A) {
+                    let line = buffered[..<newline]
+                    buffered.removeSubrange(...newline)
+                    guard let request = try? JSONDecoder().decode(JSONValue.self, from: line),
+                          let object = request.objectValue,
+                          let method = object["method"]?.stringValue,
+                          let id = object["id"]?.integerValue
+                    else { continue }
+
+                    let result: JSONValue = lock.withLock {
+                        responseResult(for: method)
+                    }
+                    let response = JSONValue.object([
+                        "id": .integer(id),
+                        "result": result,
+                    ])
+                    responses.write(try JSONEncoder().encode(response) + Data([0x0A]))
+                }
+            }
+        } catch {
+            // Closing the client ends the fake server's request stream.
+        }
+    }
+
+    private func responseResult(for method: String) -> JSONValue {
+        switch method {
+        case "initialize":
+            return .object([:])
+        case "thread/list":
+            let result = listResults[min(listIndex, listResults.count - 1)]
+            listIndex += 1
+            return result
+        case "thread/read":
+            let result = detailResults[min(detailIndex, detailResults.count - 1)]
+            detailIndex += 1
+            return result
+        default:
+            return .object([:])
+        }
     }
 }

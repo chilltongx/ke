@@ -76,7 +76,7 @@ if [[ -f "$ROOT/Resources/Info.plist" ]]; then
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 'Codex 可' ]] || fail 'unexpected CFBundleName'
   [[ "$bundle_short_version" == 0.1.0 ]] || fail 'unexpected short version'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$ROOT/Resources/Info.plist" 2>/dev/null)" == AppIcon ]] || fail 'CFBundleIconFile must be AppIcon'
-  [[ "$bundle_build_version" == 8 ]] || fail 'bundle version must be 8'
+  [[ "$bundle_build_version" == 9 ]] || fail 'bundle version must be 9'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 14.0 ]] || fail 'unexpected minimum system version'
   if /usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$ROOT/Resources/Info.plist" >/dev/null 2>&1; then
     fail 'LSUIElement must be absent so Dock reopen remains reachable'

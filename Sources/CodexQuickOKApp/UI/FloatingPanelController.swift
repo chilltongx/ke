@@ -54,6 +54,16 @@ final class SystemAccessibilityAnnouncer: AccessibilityAnnouncing {
 }
 
 @MainActor
+private final class FloatingPanelCanvasView: NSView {
+    override var isOpaque: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit === self ? nil : hit
+    }
+}
+
+@MainActor
 protocol CompanionPanel: AnyObject {
     var onActivate: (() -> Void)? { get set }
     var onTemporaryHide: (() -> Void)? { get set }
@@ -72,6 +82,9 @@ protocol CompanionPanel: AnyObject {
 final class FloatingPanelController: NSObject, CompanionPanel {
     private static let failureDisplayDuration: TimeInterval = 4
     private static let terminalFlashDuration: TimeInterval = 1.6
+    private static let buttonDiameter: CGFloat = 64
+    private static let glowCanvasPadding: CGFloat = 6
+    private static let glowCanvasSize = NSSize(width: 76, height: 76)
 
     private enum AnimationKey {
         static let presence = "presence"
@@ -91,6 +104,9 @@ final class FloatingPanelController: NSObject, CompanionPanel {
     private let accessibilityAnnouncer: any AccessibilityAnnouncing
     let button = HaloButtonView(
         frame: NSRect(x: 0, y: 0, width: 64, height: 64)
+    )
+    private let canvas = FloatingPanelCanvasView(
+        frame: NSRect(origin: .zero, size: glowCanvasSize)
     )
     private let quotaDetailItem = NSMenuItem(
         title: "周额度暂不可用",
@@ -122,7 +138,7 @@ final class FloatingPanelController: NSObject, CompanionPanel {
         self.feedbackScheduler = feedbackScheduler
         self.accessibilityAnnouncer = accessibilityAnnouncer
         panel = NSPanel(
-            contentRect: button.bounds,
+            contentRect: NSRect(origin: .zero, size: Self.glowCanvasSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -135,7 +151,16 @@ final class FloatingPanelController: NSObject, CompanionPanel {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
-        panel.contentView = button
+        canvas.wantsLayer = true
+        canvas.layer?.masksToBounds = false
+        button.frame = NSRect(
+            x: Self.glowCanvasPadding,
+            y: Self.glowCanvasPadding,
+            width: Self.buttonDiameter,
+            height: Self.buttonDiameter
+        )
+        canvas.addSubview(button)
+        panel.contentView = canvas
         button.reduceMotion = reduceMotion
 
         button.wantsLayer = true
@@ -154,7 +179,10 @@ final class FloatingPanelController: NSObject, CompanionPanel {
             panel.setFrameOrigin(origin)
         } else if let visible = NSScreen.main?.visibleFrame {
             panel.setFrameOrigin(
-                NSPoint(x: visible.maxX - 88, y: visible.midY - 32)
+                NSPoint(
+                    x: visible.maxX - 88 - Self.glowCanvasPadding,
+                    y: visible.midY - 32 - Self.glowCanvasPadding
+                )
             )
         }
 

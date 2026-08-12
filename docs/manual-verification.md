@@ -1,7 +1,7 @@
-# Manual Verification — Build 8
+# Manual Verification — Build 9
 
 本清单是当前 macOS 本地包的发布门槛。`PASS (automatic)` 只表示对应的隔离测试已覆盖；
-标为 `PENDING` 的项目在完成前不得宣称 Build 8 已通过完整实机验收。
+标为 `PENDING` 的项目在完成前不得宣称 Build 9 已通过完整实机验收。
 
 ## Automatic evidence
 
@@ -12,7 +12,7 @@
 | `zsh Tests/AppIconTests.sh` | App icon renderer checks passed. | Yes |
 | `zsh Tests/SigningTests.sh` | Stable signing checks passed. | Yes，使用命令替身 |
 | `codesign --verify --deep --strict 'dist/Codex 可.app'` | exit 0 | No，仅本地发布包 |
-| Bundle version | 0.1.0 (8) | Yes，与 `Info.plist` 一致性检查 |
+| Bundle version | 0.1.0 (9) | Yes，与 `Info.plist` 一致性检查 |
 
 macOS CI 不运行真实发布构建，不读取登录钥匙串，不创建签名身份，也不安装、启动或卸载应用。
 打包与安装行为测试只在临时目录和隔离的 `HOME` 中使用命令替身。
@@ -64,7 +64,7 @@ macOS CI 不运行真实发布构建，不读取登录钥匙串，不创建签�
 | 31 | 第二次空草稿检查后、首个写入事件前出现晚到草稿时，草稿保持不变且不投递 Enter | PASS (automatic controlled race) |
 | 32 | App Server 接收请求后永久静默时，请求按期限失败、所有 pending 被恢复，停止和后续重连均不挂起 | PASS (automatic) |
 | 33 | 权限缺失、目标不受支持等失败只在按钮上显示约 4 秒红色反馈，并发出 VoiceOver 公告；不出现额外窗口或气泡 | PENDING (manual) |
-| 34 | 新任务完成时，现有额度圆环最外缘微微发光三次，不叠加明显新圆环；同一任务回合后续轮询不重复提醒 | PENDING (manual) |
+| 34 | 新任务完成时，现有额度圆环最外缘四周完整微微发光三次，不被窗口边缘裁切、不叠加明显新圆环；同一任务回合后续轮询不重复提醒 | PENDING (manual) |
 | 35 | 新任务被终止时沿用同一额度圆环外缘微光；多个任务同时结束时逐个提醒 | PENDING (manual) |
 | 36 | 启用“减少动态效果”时，任务完成或终止改为短暂静态亮环并发出 VoiceOver 公告 | PASS (automatic) |
 | 37 | 临时隐藏期间完成或终止的任务不擅自显示按钮，点击 Dock 恢复后依次提醒 | PASS (automatic) |

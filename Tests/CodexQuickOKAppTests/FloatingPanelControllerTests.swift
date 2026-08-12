@@ -1,9 +1,58 @@
+import AppKit
 import CodexQuickOKCore
 import XCTest
 @testable import CodexQuickOKApp
 
 @MainActor
 final class FloatingPanelControllerTests: XCTestCase {
+    func testPanelCanvasPreservesGlowPixelsOutsideSixtyFourPointButton() throws {
+        let controller = FloatingPanelController(
+            positionStore: PanelPositionStore(
+                defaults: UserDefaults(suiteName: #function)!
+            ),
+            reduceMotion: { true }
+        )
+        controller.show(mode: .running)
+        defer { controller.hide() }
+
+        let contentView = try XCTUnwrap(controller.button.window?.contentView)
+        contentView.layoutSubtreeIfNeeded()
+        XCTAssertEqual(contentView.bounds.size, NSSize(width: 76, height: 76))
+        XCTAssertEqual(
+            controller.button.frame,
+            NSRect(x: 6, y: 6, width: 64, height: 64)
+        )
+        XCTAssertEqual(controller.button.terminalFlashLayer.lineWidth, 4)
+        XCTAssertEqual(
+            controller.button.terminalFlashLayer.path?.boundingBoxOfPath,
+            NSRect(x: 3, y: 3, width: 58, height: 58)
+        )
+        XCTAssertTrue(
+            contentView.hitTest(NSPoint(x: 38, y: 38)) === controller.button
+        )
+        XCTAssertNil(contentView.hitTest(NSPoint(x: 2, y: 38)))
+
+        controller.showTaskTerminal(.completed)
+        controller.button.terminalFlashLayer.shadowOpacity = 0
+        let withoutGlow = try snapshot(of: contentView)
+        let withoutGlowMarginAlpha = alphaSum(
+            in: withoutGlow,
+            outside: controller.button.frame,
+            viewBounds: contentView.bounds
+        )
+
+        controller.button.terminalFlashLayer.shadowOpacity = 0.24
+        let withGlow = try snapshot(of: contentView)
+        let withGlowMarginAlpha = alphaSum(
+            in: withGlow,
+            outside: controller.button.frame,
+            viewBounds: contentView.bounds
+        )
+
+        XCTAssertGreaterThan(withGlowMarginAlpha, withoutGlowMarginAlpha)
+        XCTAssertEqual(perimeterAlphaSum(in: withGlow), 0, accuracy: 0.001)
+    }
+
     func testReduceMotionSkipsContinuousAnimations() {
         let controller = FloatingPanelController(
             positionStore: PanelPositionStore(
@@ -500,6 +549,72 @@ final class FloatingPanelControllerTests: XCTestCase {
             } == true
         )
         controller.hide()
+    }
+
+    private func snapshot(of view: NSView) throws -> NSBitmapImageRep {
+        let representation = try XCTUnwrap(
+            view.bitmapImageRepForCachingDisplay(in: view.bounds)
+        )
+        view.cacheDisplay(in: view.bounds, to: representation)
+        return representation
+    }
+
+    private func alphaSum(
+        in representation: NSBitmapImageRep,
+        outside excludedFrame: NSRect,
+        viewBounds: NSRect
+    ) -> Double {
+        var result = 0.0
+        for y in 0..<representation.pixelsHigh {
+            for x in 0..<representation.pixelsWide {
+                let point = NSPoint(
+                    x: viewBounds.minX
+                        + (CGFloat(x) + 0.5) * viewBounds.width
+                        / CGFloat(representation.pixelsWide),
+                    y: viewBounds.minY
+                        + (CGFloat(y) + 0.5) * viewBounds.height
+                        / CGFloat(representation.pixelsHigh)
+                )
+                guard !excludedFrame.contains(point) else { continue }
+                result += Double(
+                    representation.colorAt(x: x, y: y)?.alphaComponent ?? 0
+                )
+            }
+        }
+        return result
+    }
+
+    private func perimeterAlphaSum(in representation: NSBitmapImageRep) -> Double {
+        guard representation.pixelsWide > 1,
+              representation.pixelsHigh > 1
+        else { return 0 }
+
+        var result = 0.0
+        for x in 0..<representation.pixelsWide {
+            result += alpha(in: representation, x: x, y: 0)
+            result += alpha(
+                in: representation,
+                x: x,
+                y: representation.pixelsHigh - 1
+            )
+        }
+        for y in 1..<(representation.pixelsHigh - 1) {
+            result += alpha(in: representation, x: 0, y: y)
+            result += alpha(
+                in: representation,
+                x: representation.pixelsWide - 1,
+                y: y
+            )
+        }
+        return result
+    }
+
+    private func alpha(
+        in representation: NSBitmapImageRep,
+        x: Int,
+        y: Int
+    ) -> Double {
+        Double(representation.colorAt(x: x, y: y)?.alphaComponent ?? 0)
     }
 }
 
