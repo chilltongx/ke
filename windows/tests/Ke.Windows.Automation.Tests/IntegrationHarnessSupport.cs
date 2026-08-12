@@ -1,0 +1,1047 @@
+using System.Diagnostics;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Windows.Automation;
+using Ke.Windows.Automation;
+using Ke.Windows.Core;
+using Xunit;
+using Xunit.Sdk;
+
+namespace Ke.Windows.Automation.Tests;
+
+internal static class HarnessPaths
+{
+    private const string HarnessProjectDirectory = "Ke.Windows.IntegrationHarness";
+
+    internal static string MainWindowXaml => Path.Combine(
+        FindRepositoryRoot(),
+        "windows",
+        "tests",
+        HarnessProjectDirectory,
+        "MainWindow.xaml");
+
+    internal static string ProjectFile => Path.Combine(
+        FindRepositoryRoot(),
+        "windows",
+        "tests",
+        HarnessProjectDirectory,
+        "Ke.Windows.IntegrationHarness.csproj");
+
+    internal static string Executable
+    {
+        get
+        {
+            var configured = Environment.GetEnvironmentVariable("KE_INTEGRATION_HARNESS_PATH");
+            if (!string.IsNullOrWhiteSpace(configured))
+            {
+                return Path.GetFullPath(configured);
+            }
+
+            var binaryRoot = Path.Combine(
+                FindRepositoryRoot(),
+                "windows",
+                "tests",
+                HarnessProjectDirectory,
+                "bin");
+            return Directory.EnumerateFiles(
+                    binaryRoot,
+                    "Ke.Windows.IntegrationHarness.exe",
+                    SearchOption.AllDirectories)
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .FirstOrDefault()
+                ?? throw new XunitException(
+                    "The integration harness executable was not built. Build the solution first.");
+        }
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        while (current is not null)
+        {
+            if (File.Exists(Path.Combine(current.FullName, "windows", "Ke.Windows.slnx")))
+            {
+                return current.FullName;
+            }
+
+            current = current.Parent;
+        }
+
+        throw new XunitException("Could not locate the repository root.");
+    }
+}
+
+internal static class HarnessProfile
+{
+    internal const string ProcessImageName = "Ke.Windows.IntegrationHarness.exe";
+
+    internal static TargetAdapterRegistry CreateRegistry() => new(
+    [
+        new ProfileTargetAdapter(new AdapterProfile(
+            ProcessImageName,
+            SupportedApplication.Codex,
+            new HashSet<ElementSignature>
+            {
+                new("ControlType.Edit", "TextBox", "ChatEmpty"),
+                new("ControlType.Document", "RichTextBox", "DocumentEmpty"),
+                new("ControlType.Edit", "TextBox", "FocusChanges")
+            },
+            new HashSet<string>(["composer"], StringComparer.Ordinal),
+            new HashSet<string>(StringComparer.Ordinal),
+            new HashSet<string>([string.Empty, "\r", "\n", "\r\n"], StringComparer.Ordinal)))
+    ]);
+
+    internal static FocusSnapshot ChatEmpty() => CreateSnapshot(
+        "ChatEmpty",
+        "ControlType.Edit",
+        "TextBox",
+        "Chat composer",
+        string.Empty);
+
+    internal static FocusSnapshot DocumentEmpty() => CreateSnapshot(
+        "DocumentEmpty",
+        "ControlType.Document",
+        "RichTextBox",
+        "Conversation composer",
+        string.Empty);
+
+    internal static FocusSnapshot FocusChanges() => CreateSnapshot(
+        "FocusChanges",
+        "ControlType.Edit",
+        "TextBox",
+        "Chat composer",
+        string.Empty);
+
+    internal static IEnumerable<FocusSnapshot> NegativeControls()
+    {
+        yield return CreateSnapshot("Search", "ControlType.Edit", "TextBox", "Search", string.Empty);
+        yield return CreateSnapshot("Editor", "ControlType.Edit", "TextBox", "Text editor", string.Empty);
+        yield return CreateSnapshot("Terminal", "ControlType.Edit", "TextBox", "Terminal", string.Empty);
+        yield return CreateSnapshot(
+            "Password",
+            "ControlType.Edit",
+            "PasswordBox",
+            "Password",
+            string.Empty,
+            isPassword: true);
+        yield return CreateSnapshot(
+            "ReadOnly",
+            "ControlType.Edit",
+            "TextBox",
+            "Read only",
+            string.Empty,
+            isReadOnly: true);
+        yield return CreateSnapshot(
+            "Disabled",
+            "ControlType.Edit",
+            "TextBox",
+            "Disabled",
+            string.Empty,
+            isEnabled: false,
+            isKeyboardFocusable: false);
+    }
+
+    internal static FocusSnapshot CreateSnapshot(
+        string automationId,
+        string controlType,
+        string className,
+        string name,
+        string? text,
+        bool isEnabled = true,
+        bool isKeyboardFocusable = true,
+        bool isPassword = false,
+        bool isReadOnly = false) => new(
+            (nint)101,
+            202,
+            ProcessImageName,
+            0x2000,
+            0x2000,
+            new ElementSummary(
+                $"fixture.{automationId}",
+                controlType,
+                className,
+                automationId,
+                name,
+                isEnabled,
+                isKeyboardFocusable,
+                isPassword,
+                isReadOnly,
+                text),
+            [],
+            []);
+}
+
+internal static class HarnessReadiness
+{
+    internal static async Task<bool> WaitAsync(
+        Func<bool> probe,
+        TimeSpan timeout,
+        TimeSpan pollInterval)
+    {
+        ArgumentNullException.ThrowIfNull(probe);
+        if (timeout <= TimeSpan.Zero || pollInterval <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        while (stopwatch.Elapsed < timeout)
+        {
+            if (probe())
+            {
+                return true;
+            }
+
+            var remaining = timeout - stopwatch.Elapsed;
+            await Task.Delay(remaining < pollInterval ? remaining : pollInterval)
+                .ConfigureAwait(false);
+        }
+
+        return probe();
+    }
+}
+
+internal sealed record HarnessTeardownResult(
+    bool Forced,
+    bool Exited,
+    IReadOnlyList<uint> RemainingDescendantProcessIds);
+
+internal static class HarnessProcessTeardown
+{
+    private static readonly TimeSpan DefaultForcedExitTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan ExitPollInterval = TimeSpan.FromMilliseconds(20);
+
+    internal static async Task<HarnessTeardownResult> CloseExactAsync(
+        Process process,
+        TimeSpan closeTimeout) =>
+        await CloseExactAsync(
+                process,
+                closeTimeout,
+                descendantConfirmed: null,
+                DefaultForcedExitTimeout)
+            .ConfigureAwait(false);
+
+    internal static async Task<HarnessTeardownResult> CloseExactAsync(
+        Process process,
+        TimeSpan closeTimeout,
+        Action<uint>? descendantConfirmed) =>
+        await CloseExactAsync(
+                process,
+                closeTimeout,
+                descendantConfirmed,
+                DefaultForcedExitTimeout)
+            .ConfigureAwait(false);
+
+    internal static async Task<HarnessTeardownResult> CloseExactAsync(
+        Process process,
+        TimeSpan closeTimeout,
+        Action<uint>? descendantConfirmed,
+        TimeSpan forcedExitTimeout)
+    {
+        ArgumentNullException.ThrowIfNull(process);
+        if (forcedExitTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(forcedExitTimeout));
+        }
+
+        var forced = false;
+        using var descendants = new ExactDescendantTracker(process, descendantConfirmed);
+        descendants.Discover();
+
+        if (!process.HasExited)
+        {
+            _ = process.CloseMainWindow();
+        }
+
+        if (!await WaitForExactTreeExitAsync(
+                process,
+                descendants,
+                closeTimeout).ConfigureAwait(false))
+        {
+            forced = true;
+            descendants.Discover();
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                // Root exited after the exact identity check.
+            }
+            catch (Win32Exception)
+            {
+                // Continue exact descendant cleanup and report a live root below.
+            }
+
+            descendants.KillRemainingExact();
+            _ = await WaitForExactTreeExitAsync(
+                process,
+                descendants,
+                forcedExitTimeout,
+                terminateDescendants: true).ConfigureAwait(false);
+        }
+
+        descendants.Discover();
+        return new(
+            forced,
+            process.HasExited,
+            descendants.GetRemainingProcessIds());
+    }
+
+    private static async Task<bool> WaitForExactTreeExitAsync(
+        Process root,
+        ExactDescendantTracker descendants,
+        TimeSpan timeout,
+        bool terminateDescendants = false)
+    {
+        if (timeout <= TimeSpan.Zero)
+        {
+            descendants.Discover();
+            if (terminateDescendants)
+            {
+                descendants.KillRemainingExact();
+            }
+
+            return root.HasExited && descendants.GetRemainingProcessIds().Count == 0;
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        var quiescentSamples = 0;
+        while (stopwatch.Elapsed < timeout)
+        {
+            descendants.Discover();
+            if (terminateDescendants)
+            {
+                descendants.KillRemainingExact();
+            }
+
+            if (root.HasExited && descendants.GetRemainingProcessIds().Count == 0)
+            {
+                quiescentSamples++;
+                if (quiescentSamples == 2)
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                quiescentSamples = 0;
+            }
+
+            var remaining = timeout - stopwatch.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            await Task.Delay(
+                    remaining < ExitPollInterval ? remaining : ExitPollInterval)
+                .ConfigureAwait(false);
+        }
+
+        descendants.Discover();
+        if (terminateDescendants)
+        {
+            descendants.KillRemainingExact();
+        }
+
+        return root.HasExited && descendants.GetRemainingProcessIds().Count == 0;
+    }
+}
+
+internal sealed class ExactDescendantTracker : IDisposable
+{
+    private readonly Dictionary<uint, List<TrackedProcessIdentity>> _identities = [];
+    private readonly Dictionary<uint, ProcessTreeEntry> _unresolvedObservations = [];
+    private readonly HashSet<uint> _observedProcessIds = [];
+    private readonly Action<uint>? _descendantObserved;
+    private readonly Func<uint, bool>? _identityUnavailable;
+    private int _disposed;
+
+    internal ExactDescendantTracker(
+        Process root,
+        Action<uint>? descendantObserved = null,
+        Func<uint, bool>? identityUnavailable = null)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+        _descendantObserved = descendantObserved;
+        _identityUnavailable = identityUnavailable;
+        AddIdentity(TrackedProcessIdentity.BorrowRoot(root));
+    }
+
+    internal void Discover()
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var firstSnapshot = ProcessTreeInspector.Capture();
+        var ancestryFrontier = _identities.Keys
+            .Concat(_unresolvedObservations.Keys)
+            .ToHashSet();
+        foreach (var candidate in firstSnapshot.FindDescendantsFrom(ancestryFrontier))
+        {
+            var confirmation = ConfirmCandidate(candidate);
+            if (confirmation == CandidateConfirmation.Unresolved)
+            {
+                _unresolvedObservations.TryAdd(candidate.ProcessId, candidate);
+                NotifyObserved(candidate.ProcessId);
+            }
+            else if (confirmation == CandidateConfirmation.Confirmed)
+            {
+                _unresolvedObservations.Remove(candidate.ProcessId);
+                NotifyObserved(candidate.ProcessId);
+            }
+        }
+    }
+
+    internal void KillRemainingExact()
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        foreach (var identity in DescendantIdentities().Where(identity => !identity.HasExited))
+        {
+            try
+            {
+                identity.Process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // The stable process identity exited before exact termination.
+            }
+            catch (Win32Exception)
+            {
+                var observation = new ProcessTreeEntry(
+                    identity.ProcessId,
+                    identity.ParentProcessId);
+                _unresolvedObservations.TryAdd(identity.ProcessId, observation);
+            }
+        }
+    }
+
+    internal IReadOnlyList<uint> GetRemainingProcessIds()
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        return DescendantIdentities()
+            .Where(identity => !identity.HasExited)
+            .Select(identity => identity.ProcessId)
+            .Concat(_unresolvedObservations.Keys)
+            .Distinct()
+            .Order()
+            .ToArray();
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        foreach (var identity in _identities.Values.SelectMany(value => value))
+        {
+            identity.Dispose();
+        }
+
+        _identities.Clear();
+        _unresolvedObservations.Clear();
+        _observedProcessIds.Clear();
+    }
+
+    private CandidateConfirmation ConfirmCandidate(ProcessTreeEntry candidateEntry)
+    {
+        Process? candidate = null;
+        Process? verification = null;
+        try
+        {
+            if (_identityUnavailable?.Invoke(candidateEntry.ProcessId) == true ||
+                !_identities.ContainsKey(candidateEntry.ParentProcessId) &&
+                _unresolvedObservations.ContainsKey(candidateEntry.ParentProcessId))
+            {
+                return CandidateConfirmation.Unresolved;
+            }
+
+            candidate = Process.GetProcessById(checked((int)candidateEntry.ProcessId));
+            _ = candidate.Handle;
+            var candidateStartTime = candidate.StartTime.ToUniversalTime();
+
+            if (HasIdentity(candidateEntry.ProcessId, candidateStartTime))
+            {
+                return CandidateConfirmation.AlreadyConfirmed;
+            }
+
+            var secondSnapshot = ProcessTreeInspector.Capture();
+            if (!secondSnapshot.TryGetParent(
+                    candidateEntry.ProcessId,
+                    out var secondParentProcessId) ||
+                secondParentProcessId != candidateEntry.ParentProcessId)
+            {
+                return CandidateConfirmation.Changed;
+            }
+
+            verification = Process.GetProcessById(checked((int)candidateEntry.ProcessId));
+            _ = verification.Handle;
+            if (verification.StartTime.ToUniversalTime() != candidateStartTime)
+            {
+                return CandidateConfirmation.Changed;
+            }
+
+            var parent = FindExactParent(
+                candidateEntry.ParentProcessId,
+                candidateStartTime);
+            if (parent is null)
+            {
+                return CandidateConfirmation.Unrelated;
+            }
+
+            AddIdentity(new TrackedProcessIdentity(
+                candidate,
+                candidateEntry.ProcessId,
+                candidateEntry.ParentProcessId,
+                candidateStartTime,
+                ownsProcess: true));
+            candidate = null;
+            return CandidateConfirmation.Confirmed;
+        }
+        catch (ArgumentException)
+        {
+            return CandidateConfirmation.Changed;
+        }
+        catch (InvalidOperationException)
+        {
+            return CandidateConfirmation.Changed;
+        }
+        catch (Win32Exception)
+        {
+            return CandidateConfirmation.Unresolved;
+        }
+        finally
+        {
+            verification?.Dispose();
+            candidate?.Dispose();
+        }
+    }
+
+    private TrackedProcessIdentity? FindExactParent(
+        uint parentProcessId,
+        DateTime childStartTimeUtc)
+    {
+        if (!_identities.TryGetValue(parentProcessId, out var identities))
+        {
+            return null;
+        }
+
+        return identities
+            .Where(identity => identity.CouldHaveCreated(childStartTimeUtc))
+            .OrderByDescending(identity => identity.StartTimeUtc)
+            .FirstOrDefault();
+    }
+
+    private bool HasIdentity(uint processId, DateTime startTimeUtc) =>
+        _identities.TryGetValue(processId, out var identities) &&
+        identities.Any(identity => identity.StartTimeUtc == startTimeUtc);
+
+    private void AddIdentity(TrackedProcessIdentity identity)
+    {
+        if (!_identities.TryGetValue(identity.ProcessId, out var identities))
+        {
+            identities = [];
+            _identities.Add(identity.ProcessId, identities);
+        }
+
+        identities.Add(identity);
+    }
+
+    private void NotifyObserved(uint processId)
+    {
+        if (_observedProcessIds.Add(processId))
+        {
+            _descendantObserved?.Invoke(processId);
+        }
+    }
+
+    private IEnumerable<TrackedProcessIdentity> DescendantIdentities() =>
+        _identities.Values
+            .SelectMany(identities => identities)
+            .Where(identity => identity.OwnsProcess);
+
+    private enum CandidateConfirmation
+    {
+        Confirmed,
+        AlreadyConfirmed,
+        Changed,
+        Unrelated,
+        Unresolved
+    }
+}
+
+internal sealed class TrackedProcessIdentity(
+    Process process,
+    uint processId,
+    uint parentProcessId,
+    DateTime startTimeUtc,
+    bool ownsProcess) : IDisposable
+{
+    internal Process Process { get; } = process;
+
+    internal uint ProcessId { get; } = processId;
+
+    internal uint ParentProcessId { get; } = parentProcessId;
+
+    internal DateTime StartTimeUtc { get; } = startTimeUtc;
+
+    internal bool OwnsProcess { get; } = ownsProcess;
+
+    internal bool HasExited
+    {
+        get
+        {
+            try
+            {
+                return Process.HasExited;
+            }
+            catch (InvalidOperationException)
+            {
+                return true;
+            }
+        }
+    }
+
+    internal static TrackedProcessIdentity BorrowRoot(Process root)
+    {
+        _ = root.Handle;
+        return new(
+            root,
+            checked((uint)root.Id),
+            0,
+            root.StartTime.ToUniversalTime(),
+            ownsProcess: false);
+    }
+
+    internal bool CouldHaveCreated(DateTime childStartTimeUtc)
+    {
+        if (childStartTimeUtc < StartTimeUtc)
+        {
+            return false;
+        }
+
+        if (!HasExited)
+        {
+            return true;
+        }
+
+        try
+        {
+            return childStartTimeUtc <= Process.ExitTime.ToUniversalTime();
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch (Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (OwnsProcess)
+        {
+            Process.Dispose();
+        }
+    }
+}
+
+internal static class HarnessInteractiveScenario
+{
+    private static readonly TimeSpan ReadinessTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(50);
+
+    internal static async Task RunAsync()
+    {
+        RequireInteractiveWindowsDesktop();
+
+        var readyEventName = $"Local\\Ke.Windows.Integration.{Guid.NewGuid():N}";
+        using var ready = new EventWaitHandle(
+            false,
+            EventResetMode.ManualReset,
+            readyEventName);
+        using var process = StartHarness(readyEventName);
+        HarnessTeardownResult? teardown = null;
+        try
+        {
+            var signaled = await Task.Run(() => ready.WaitOne(ReadinessTimeout))
+                .ConfigureAwait(false);
+            if (!signaled || process.HasExited)
+            {
+                throw new XunitException(
+                    "The integration harness did not become ready within five seconds.");
+            }
+
+            using var dispatcher = new AutomationDispatcher();
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            await dispatcher.InvokeAsync(
+                token =>
+                {
+                    RunPipeline(process, token);
+                    return true;
+                },
+                cancellation.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            teardown = await HarnessProcessTeardown.CloseExactAsync(
+                process,
+                TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            if (teardown.Forced || !teardown.Exited ||
+                teardown.RemainingDescendantProcessIds.Count != 0)
+            {
+                throw new XunitException(
+                    "The harness did not close cleanly; its exact process tree was terminated.");
+            }
+        }
+    }
+
+    private static void RunPipeline(Process process, CancellationToken cancellationToken)
+    {
+        var window = WaitForWindow(process.Id, cancellationToken);
+        var sender = new FocusedChatSender(
+            new FocusSnapshotProvider(),
+            HarnessProfile.CreateRegistry(),
+            new WindowsInputWriter());
+
+        AssertSend(sender, window, "ChatEmpty", expectedSuccess: true, cancellationToken);
+        Assert.Equal(ProductInfo.ApprovalText, ReadValue(window, "ChatEmpty"));
+        Assert.Equal("1", ReadName(window, "EnterCount"));
+
+        AssertSend(sender, window, "DocumentEmpty", expectedSuccess: true, cancellationToken);
+        Assert.Equal(ProductInfo.ApprovalText, ReadValue(window, "DocumentEmpty"));
+        Assert.Equal("2", ReadName(window, "EnterCount"));
+
+        foreach (var automationId in new[]
+                 {
+                     "Search", "Editor", "Terminal", "Password", "ReadOnly", "Disabled"
+                 })
+        {
+            var control = FindByAutomationId(window, automationId);
+            var before = ReadValueIfAvailable(control);
+            var focused = TryFocus(window, control, cancellationToken);
+            if (automationId == "Disabled")
+            {
+                Assert.False(focused);
+            }
+            else
+            {
+                Assert.True(focused);
+            }
+
+            var result = sender.TrySend(cancellationToken);
+            Assert.False(result.IsSuccess);
+            Assert.Equal(before, ReadValueIfAvailable(control));
+            Assert.Equal("2", ReadName(window, "EnterCount"));
+        }
+
+        var focusChanges = FindByAutomationId(window, "FocusChanges");
+        Assert.True(TryFocus(window, focusChanges, cancellationToken));
+        var focusChangeResult = sender.TrySend(cancellationToken);
+        Assert.Equal(SendErrorCode.WriteUnconfirmed, focusChangeResult.Error);
+        Assert.Equal("2", ReadName(window, "EnterCount"));
+    }
+
+    private static void AssertSend(
+        FocusedChatSender sender,
+        AutomationElement window,
+        string automationId,
+        bool expectedSuccess,
+        CancellationToken cancellationToken)
+    {
+        var control = FindByAutomationId(window, automationId);
+        Assert.True(TryFocus(window, control, cancellationToken));
+        Assert.Equal(expectedSuccess, sender.TrySend(cancellationToken).IsSuccess);
+    }
+
+    private static bool TryFocus(
+        AutomationElement window,
+        AutomationElement control,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _ = NativeDesktop.SetForegroundWindow(new nint(window.Current.NativeWindowHandle));
+        try
+        {
+            control.SetFocus();
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+
+        var expectedRuntimeId = control.GetRuntimeId();
+        return WaitUntil(
+            () =>
+            {
+                var focused = AutomationElement.FocusedElement;
+                return focused is not null &&
+                    focused.GetRuntimeId().SequenceEqual(expectedRuntimeId);
+            },
+            ReadinessTimeout,
+            cancellationToken);
+    }
+
+    private static AutomationElement WaitForWindow(
+        int processId,
+        CancellationToken cancellationToken)
+    {
+        AutomationElement? window = null;
+        var found = WaitUntil(
+            () =>
+            {
+                window = AutomationElement.RootElement.FindFirst(
+                    TreeScope.Children,
+                    new PropertyCondition(
+                        AutomationElement.ProcessIdProperty,
+                        processId));
+                return window is not null;
+            },
+            ReadinessTimeout,
+            cancellationToken);
+        return found
+            ? window!
+            : throw new XunitException(
+                "The ready harness window was not available through UI Automation.");
+    }
+
+    private static AutomationElement FindByAutomationId(
+        AutomationElement window,
+        string automationId) =>
+        window.FindFirst(
+            TreeScope.Descendants,
+            new PropertyCondition(
+                AutomationElement.AutomationIdProperty,
+                automationId))
+        ?? throw new XunitException($"Harness control '{automationId}' was not found.");
+
+    private static string? ReadValueIfAvailable(AutomationElement element)
+    {
+        if (element.TryGetCurrentPattern(ValuePattern.Pattern, out var value) &&
+            value is ValuePattern valuePattern)
+        {
+            return valuePattern.Current.Value;
+        }
+
+        if (element.TryGetCurrentPattern(TextPattern.Pattern, out var text) &&
+            text is TextPattern textPattern)
+        {
+            return textPattern.DocumentRange.GetText(-1);
+        }
+
+        return null;
+    }
+
+    private static string ReadValue(AutomationElement window, string automationId) =>
+        ReadValueIfAvailable(FindByAutomationId(window, automationId))
+        ?? throw new XunitException($"Harness control '{automationId}' has no readable value.");
+
+    private static string ReadName(AutomationElement window, string automationId) =>
+        FindByAutomationId(window, automationId).Current.Name;
+
+    private static bool WaitUntil(
+        Func<bool> probe,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        while (stopwatch.Elapsed < timeout)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (probe())
+            {
+                return true;
+            }
+
+            Thread.Sleep(PollInterval);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return probe();
+    }
+
+    private static Process StartHarness(string readyEventName)
+    {
+        var start = new ProcessStartInfo
+        {
+            FileName = HarnessPaths.Executable,
+            UseShellExecute = false
+        };
+        start.ArgumentList.Add("--ready-event");
+        start.ArgumentList.Add(readyEventName);
+        return Process.Start(start)
+            ?? throw new XunitException("Failed to start the integration harness.");
+    }
+
+    private static void RequireInteractiveWindowsDesktop()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new XunitException("Interactive harness tests require Windows.");
+        }
+
+        if (!Environment.UserInteractive || Process.GetCurrentProcess().SessionId == 0)
+        {
+            throw new XunitException(
+                "Interactive harness tests require a logged-in, non-service Windows desktop session.");
+        }
+
+        if (AutomationElement.RootElement is null)
+        {
+            throw new XunitException("Windows UI Automation is unavailable in this session.");
+        }
+    }
+}
+
+internal static class NativeDesktop
+{
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetForegroundWindow(nint window);
+}
+
+internal static class ProcessTreeInspector
+{
+    private const uint SnapshotProcesses = 0x00000002;
+    private static readonly nint InvalidHandleValue = new(-1);
+
+    internal static ProcessTreeSnapshot Capture()
+    {
+        var snapshot = CreateToolhelp32Snapshot(SnapshotProcesses, 0);
+        if (snapshot == InvalidHandleValue)
+        {
+            throw new XunitException("Could not inspect the harness process tree.");
+        }
+
+        try
+        {
+            var entries = new List<ProcessTreeEntry>();
+            var entry = new ProcessEntry32
+            {
+                Size = checked((uint)Marshal.SizeOf<ProcessEntry32>())
+            };
+            if (Process32First(snapshot, ref entry))
+            {
+                do
+                {
+                    entries.Add(new(entry.ProcessId, entry.ParentProcessId));
+                    entry.Size = checked((uint)Marshal.SizeOf<ProcessEntry32>());
+                }
+                while (Process32Next(snapshot, ref entry));
+            }
+
+            return new ProcessTreeSnapshot(entries);
+        }
+        finally
+        {
+            _ = CloseHandle(snapshot);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ProcessEntry32
+    {
+        internal uint Size;
+        private uint _usage;
+        internal uint ProcessId;
+        private nuint _defaultHeapId;
+        private uint _moduleId;
+        private uint _threads;
+        internal uint ParentProcessId;
+        private int _basePriority;
+        private uint _flags;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        private string _executableFile;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool Process32First(nint snapshot, ref ProcessEntry32 entry);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool Process32Next(nint snapshot, ref ProcessEntry32 entry);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(nint handle);
+}
+
+internal sealed record ProcessTreeEntry(uint ProcessId, uint ParentProcessId);
+
+internal sealed class ProcessTreeSnapshot
+{
+    private readonly IReadOnlyDictionary<uint, ProcessTreeEntry> _byProcessId;
+    private readonly IReadOnlyDictionary<uint, IReadOnlyList<ProcessTreeEntry>> _byParentProcessId;
+
+    internal ProcessTreeSnapshot(IEnumerable<ProcessTreeEntry> entries)
+    {
+        var materialized = entries
+            .Where(entry => entry.ProcessId != 0)
+            .GroupBy(entry => entry.ProcessId)
+            .Select(group => group.Last())
+            .ToArray();
+        _byProcessId = materialized.ToDictionary(entry => entry.ProcessId);
+        _byParentProcessId = materialized
+            .GroupBy(entry => entry.ParentProcessId)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<ProcessTreeEntry>)group.ToArray());
+    }
+
+    internal bool Contains(uint processId) => _byProcessId.ContainsKey(processId);
+
+    internal bool TryGetParent(uint processId, out uint parentProcessId)
+    {
+        if (_byProcessId.TryGetValue(processId, out var entry))
+        {
+            parentProcessId = entry.ParentProcessId;
+            return true;
+        }
+
+        parentProcessId = 0;
+        return false;
+    }
+
+    internal IReadOnlyList<ProcessTreeEntry> FindDescendantsFrom(
+        IReadOnlySet<uint> confirmedParentProcessIds)
+    {
+        var descendants = new List<ProcessTreeEntry>();
+        var visited = new HashSet<uint>(confirmedParentProcessIds);
+        var frontier = new Queue<uint>(confirmedParentProcessIds);
+        while (frontier.Count != 0)
+        {
+            var parentProcessId = frontier.Dequeue();
+            if (!_byParentProcessId.TryGetValue(parentProcessId, out var children))
+            {
+                continue;
+            }
+
+            foreach (var child in children)
+            {
+                if (visited.Add(child.ProcessId))
+                {
+                    descendants.Add(child);
+                    frontier.Enqueue(child.ProcessId);
+                }
+            }
+        }
+
+        return descendants;
+    }
+}

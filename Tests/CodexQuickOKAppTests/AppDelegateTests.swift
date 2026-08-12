@@ -7,6 +7,64 @@ import XCTest
 
 @MainActor
 final class AppDelegateManualModeTests: XCTestCase {
+    func testLaunchFocusTargetUsesTopmostRegularWindowWhenAppIsAlreadyFrontmost() {
+        let target = AppDelegate.launchFocusTargetProcessIdentifier(
+            currentProcessIdentifier: 100,
+            frontmostProcessIdentifier: 100,
+            windowCandidates: [
+                .init(processIdentifier: 200, layer: 25, isRegularApplication: false),
+                .init(processIdentifier: 300, layer: 0, isRegularApplication: false),
+                .init(processIdentifier: 400, layer: 0, isRegularApplication: true),
+                .init(processIdentifier: 500, layer: 0, isRegularApplication: true),
+            ]
+        )
+
+        XCTAssertEqual(target, 400)
+    }
+
+    func testRestoresPreviouslyFrontmostApplicationAfterBecomingActive() {
+        var restoredProcessIdentifiers: [pid_t] = []
+        var pendingRestorations: [@MainActor () -> Void] = []
+        let delegate = makeDelegate(
+            scheduleActivationRestoration: { operation in
+                pendingRestorations.append(operation)
+            },
+            initialActivationRestoreTargetProcessIdentifier: 4_242,
+            restoreApplicationActivation: {
+                restoredProcessIdentifiers.append($0)
+            }
+        )
+
+        delegate.applicationDidBecomeActive(
+            Notification(name: NSApplication.didBecomeActiveNotification)
+        )
+
+        XCTAssertTrue(restoredProcessIdentifiers.isEmpty)
+        XCTAssertEqual(pendingRestorations.count, 1)
+        pendingRestorations.removeFirst()()
+        XCTAssertEqual(restoredProcessIdentifiers, [4_242])
+    }
+
+    func testWillBecomeActiveRefreshesStaleLaunchTarget() {
+        var restoredProcessIdentifiers: [pid_t] = []
+        let delegate = makeDelegate(
+            initialActivationRestoreTargetProcessIdentifier: 4_242,
+            focusRestoreTargetProvider: { 5_252 },
+            restoreApplicationActivation: {
+                restoredProcessIdentifiers.append($0)
+            }
+        )
+
+        delegate.applicationWillBecomeActive(
+            Notification(name: NSApplication.willBecomeActiveNotification)
+        )
+        delegate.applicationDidBecomeActive(
+            Notification(name: NSApplication.didBecomeActiveNotification)
+        )
+
+        XCTAssertEqual(restoredProcessIdentifiers, [5_252])
+    }
+
     func testManualRuntimeShowsImmediatelyAndReopenRestoresIt() {
         let panel = RecordingPanel()
         let delegate = makeDelegate()
@@ -21,6 +79,100 @@ final class AppDelegateManualModeTests: XCTestCase {
             )
         )
         XCTAssertEqual(panel.lastMode, .running)
+    }
+
+    func testTerminalSnapshotPrimesThenPublishesEachNewTurnOnce() {
+        let panel = RecordingPanel()
+        let delegate = makeDelegate(terminalMonitoringStartedAt: 100)
+        delegate.configureManualRuntime(panel: panel, sender: StubSender())
+        let old = terminalTurn(threadID: "old", turnID: "turn-1", outcome: .completed)
+        let completed = terminalTurn(
+            threadID: "new",
+            turnID: "turn-2",
+            outcome: .completed,
+            completedAt: 100
+        )
+        let interrupted = terminalTurn(
+            threadID: "other",
+            turnID: "turn-3",
+            outcome: .interrupted,
+            completedAt: 101
+        )
+        let newlyVisibleHistorical = terminalTurn(
+            threadID: "historical",
+            turnID: "turn-4",
+            outcome: .completed,
+            completedAt: 99
+        )
+
+        delegate.applyRecentTaskSnapshot(
+            CodexRecentTaskSnapshot(attention: nil, terminalTurns: [old])
+        )
+        delegate.applyRecentTaskSnapshot(
+            CodexRecentTaskSnapshot(
+                attention: nil,
+                terminalTurns: [old, newlyVisibleHistorical, completed, interrupted]
+            )
+        )
+        delegate.applyRecentTaskSnapshot(
+            CodexRecentTaskSnapshot(
+                attention: nil,
+                terminalTurns: [old, newlyVisibleHistorical, completed, interrupted]
+            )
+        )
+
+        XCTAssertEqual(panel.terminalOutcomes, [.completed, .interrupted])
+    }
+
+    func testInitialSnapshotPublishesTurnsCompletedSinceMonitoringBegan() {
+        let panel = RecordingPanel()
+        let delegate = makeDelegate(terminalMonitoringStartedAt: 100)
+        delegate.configureManualRuntime(panel: panel, sender: StubSender())
+        let historical = terminalTurn(
+            threadID: "old",
+            turnID: "turn-1",
+            outcome: .completed,
+            completedAt: 99
+        )
+        let completedAfterLaunch = terminalTurn(
+            threadID: "new",
+            turnID: "turn-2",
+            outcome: .completed,
+            completedAt: 100
+        )
+        let interruptedAfterLaunch = terminalTurn(
+            threadID: "other",
+            turnID: "turn-3",
+            outcome: .interrupted,
+            completedAt: 101
+        )
+
+        delegate.applyRecentTaskSnapshot(
+            CodexRecentTaskSnapshot(
+                attention: nil,
+                terminalTurns: [
+                    historical,
+                    completedAfterLaunch,
+                    interruptedAfterLaunch,
+                ]
+            )
+        )
+
+        XCTAssertEqual(panel.terminalOutcomes, [.completed, .interrupted])
+    }
+
+    private func terminalTurn(
+        threadID: String,
+        turnID: String,
+        outcome: CodexTerminalOutcome,
+        completedAt: Int = 1
+    ) -> CodexTerminalTurn {
+        CodexTerminalTurn(
+            threadID: threadID,
+            turnID: turnID,
+            outcome: outcome,
+            completedAt: completedAt
+        )
     }
 
     func testReopenDuringSuspendedSendKeepsSingleInFlightAttempt() async {
@@ -142,14 +294,27 @@ final class AppDelegateManualModeTests: XCTestCase {
         loginItemManager: any LegacyLoginItemManaging =
             FakeLoginItemManager(status: .notRegistered),
         loginMigrationState: any LegacyLoginItemMigrationStateStoring =
-            FakeLoginItemMigrationState()
+            FakeLoginItemMigrationState(),
+        scheduleActivationRestoration: @escaping (
+            @escaping @MainActor () -> Void
+        ) -> Void = { $0() },
+        initialActivationRestoreTargetProcessIdentifier: pid_t? = nil,
+        focusRestoreTargetProvider: @escaping () -> pid_t? = { nil },
+        terminalMonitoringStartedAt: Int = Int(Date().timeIntervalSince1970),
+        restoreApplicationActivation: @escaping @MainActor (pid_t) -> Void = { _ in }
     ) -> AppDelegate {
         AppDelegate(
             appServer: ControlledAppServer(),
             codexBinaryProvider: { URL(fileURLWithPath: "/tmp/codex") },
             terminationReply: { _ in },
             loginItemManager: loginItemManager,
-            loginMigrationState: loginMigrationState
+            loginMigrationState: loginMigrationState,
+            scheduleActivationRestoration: scheduleActivationRestoration,
+            initialActivationRestoreTargetProcessIdentifier:
+                initialActivationRestoreTargetProcessIdentifier,
+            focusRestoreTargetProvider: focusRestoreTargetProvider,
+            terminalMonitoringStartedAt: terminalMonitoringStartedAt,
+            restoreApplicationActivation: restoreApplicationActivation
         )
     }
 }
@@ -203,6 +368,7 @@ final class AppDelegateConfigurationTests: XCTestCase {
 
     func testQuotaRefreshUsesFiveMinuteInterval() {
         XCTAssertEqual(AppDelegate.quotaRefreshInterval, 300)
+        XCTAssertEqual(AppDelegate.attentionRefreshInterval, 3)
     }
 
     func testReconnectBackoffCapsAtFiveMinutes() {
@@ -378,6 +544,10 @@ private actor QuotaControlledAppServer: CodexAppServerServing {
         }
     }
 
+    func readRecentTaskSnapshot() async throws -> CodexRecentTaskSnapshot {
+        CodexRecentTaskSnapshot(attention: nil, terminalTurns: [])
+    }
+
     func setRateLimitUpdateHandler(
         _ handler: @escaping @Sendable () -> Void
     ) async throws {
@@ -444,6 +614,10 @@ private actor ControlledAppServer: CodexAppServerServing {
 
     func readRateLimits() async throws -> RateLimitsReadResult {
         throw TestError.unavailable
+    }
+
+    func readRecentTaskSnapshot() async throws -> CodexRecentTaskSnapshot {
+        CodexRecentTaskSnapshot(attention: nil, terminalTurns: [])
     }
 
     func setRateLimitUpdateHandler(

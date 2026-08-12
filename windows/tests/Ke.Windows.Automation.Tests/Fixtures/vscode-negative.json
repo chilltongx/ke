@@ -1,0 +1,32 @@
+[
+  {
+    "application": "visual-studio-code", "processImageName": "Code.exe", "scenario": "editor",
+    "focused": {"controlType": "ControlType.Edit", "className": "monaco-editor", "automationId": "workbench.panel.input", "genericRoleTokens": ["composer"], "isEnabled": true, "isKeyboardFocusable": true, "isPassword": false, "isReadOnly": false, "textShape": "empty", "emptyArtifactUtf16Hex": ""},
+    "ancestors": [{"controlType": "ControlType.Pane", "className": "part panel", "automationId": "editor", "genericRoleTokens": ["chat", "editor"], "isEnabled": true, "isKeyboardFocusable": false, "isPassword": false, "isReadOnly": false, "textShape": "non-empty", "emptyArtifactUtf16Hex": null}], "nearby": []
+  },
+  {
+    "application": "visual-studio-code", "processImageName": "Code.exe", "scenario": "terminal",
+    "focused": {"controlType": "ControlType.Edit", "className": "monaco-editor", "automationId": "workbench.panel.input", "genericRoleTokens": ["composer"], "isEnabled": true, "isKeyboardFocusable": true, "isPassword": false, "isReadOnly": false, "textShape": "empty", "emptyArtifactUtf16Hex": ""},
+    "ancestors": [{"controlType": "ControlType.Pane", "className": "part panel", "automationId": "terminal", "genericRoleTokens": ["chat", "terminal"], "isEnabled": true, "isKeyboardFocusable": false, "isPassword": false, "isReadOnly": false, "textShape": "non-empty", "emptyArtifactUtf16Hex": null}], "nearby": []
+  },
+  {
+    "application": "visual-studio-code", "processImageName": "Code.exe", "scenario": "search",
+    "focused": {"controlType": "ControlType.Edit", "className": "monaco-editor", "automationId": "workbench.panel.input", "genericRoleTokens": ["composer"], "isEnabled": true, "isKeyboardFocusable": true, "isPassword": false, "isReadOnly": false, "textShape": "empty", "emptyArtifactUtf16Hex": ""},
+    "ancestors": [{"controlType": "ControlType.Pane", "className": "part panel", "automationId": "search", "genericRoleTokens": ["chat", "search"], "isEnabled": true, "isKeyboardFocusable": false, "isPassword": false, "isReadOnly": false, "textShape": "non-empty", "emptyArtifactUtf16Hex": null}], "nearby": []
+  },
+  {
+    "application": "visual-studio-code", "processImageName": "Code.exe", "scenario": "settings",
+    "focused": {"controlType": "ControlType.Edit", "className": "monaco-editor", "automationId": "workbench.panel.input", "genericRoleTokens": ["composer"], "isEnabled": true, "isKeyboardFocusable": true, "isPassword": false, "isReadOnly": false, "textShape": "empty", "emptyArtifactUtf16Hex": ""},
+    "ancestors": [{"controlType": "ControlType.Pane", "className": "part panel", "automationId": "settings", "genericRoleTokens": ["chat", "settings"], "isEnabled": true, "isKeyboardFocusable": false, "isPassword": false, "isReadOnly": false, "textShape": "non-empty", "emptyArtifactUtf16Hex": null}], "nearby": []
+  },
+  {
+    "application": "visual-studio-code", "processImageName": "Code.exe", "scenario": "command-palette",
+    "focused": {"controlType": "ControlType.Edit", "className": "monaco-editor", "automationId": "workbench.panel.input", "genericRoleTokens": ["composer"], "isEnabled": true, "isKeyboardFocusable": true, "isPassword": false, "isReadOnly": false, "textShape": "empty", "emptyArtifactUtf16Hex": ""},
+    "ancestors": [{"controlType": "ControlType.Pane", "className": "part panel", "automationId": "command palette", "genericRoleTokens": ["chat", "command palette"], "isEnabled": true, "isKeyboardFocusable": false, "isPassword": false, "isReadOnly": false, "textShape": "non-empty", "emptyArtifactUtf16Hex": null}], "nearby": []
+  },
+  {
+    "application": "visual-studio-code", "processImageName": "Code.exe", "scenario": "quick-open",
+    "focused": {"controlType": "ControlType.Edit", "className": "monaco-editor", "automationId": "workbench.panel.input", "genericRoleTokens": ["composer"], "isEnabled": true, "isKeyboardFocusable": true, "isPassword": false, "isReadOnly": false, "textShape": "empty", "emptyArtifactUtf16Hex": ""},
+    "ancestors": [{"controlType": "ControlType.Pane", "className": "part panel", "automationId": "quick open", "genericRoleTokens": ["chat", "quick open"], "isEnabled": true, "isKeyboardFocusable": false, "isPassword": false, "isReadOnly": false, "textShape": "non-empty", "emptyArtifactUtf16Hex": null}], "nearby": []
+  }
+]

@@ -10,8 +10,8 @@ SECOND_ICONSET="$WORK/Second.iconset"
 ICNS="$WORK/AppIcon.icns"
 
 test -x "$RENDERER"
-rg -F 'let glyph = "可"' "$RENDERER" >/dev/null
-rg -F 'PingFangSC-Semibold' "$RENDERER" >/dev/null
+grep -Fq 'let glyph = "可"' "$RENDERER"
+grep -Fq 'PingFangSC-Semibold' "$RENDERER"
 
 "$RENDERER" "$ICONSET"
 "$RENDERER" "$SECOND_ICONSET"

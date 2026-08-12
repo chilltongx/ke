@@ -1,0 +1,32 @@
+{
+  "application": "codex",
+  "processImageName": "Codex.exe",
+  "scenario": "chat-empty",
+  "focused": {
+    "controlType": "ControlType.Edit",
+    "className": "Chrome_RenderWidgetHostHWND",
+    "automationId": "input-primary",
+    "genericRoleTokens": ["composer"],
+    "isEnabled": true,
+    "isKeyboardFocusable": true,
+    "isPassword": false,
+    "isReadOnly": false,
+    "textShape": "contenteditable-break",
+    "emptyArtifactUtf16Hex": "000A"
+  },
+  "ancestors": [
+    {
+      "controlType": "ControlType.Pane",
+      "className": "Chrome_WidgetWin_1",
+      "automationId": "container-primary",
+      "genericRoleTokens": ["chat", "conversation"],
+      "isEnabled": true,
+      "isKeyboardFocusable": false,
+      "isPassword": false,
+      "isReadOnly": false,
+      "textShape": "non-empty",
+      "emptyArtifactUtf16Hex": null
+    }
+  ],
+  "nearby": []
+}

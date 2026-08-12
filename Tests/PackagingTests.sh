@@ -50,6 +50,7 @@ for file in \
   scripts/setup-local-signing.sh \
   scripts/install-local.sh \
   scripts/uninstall-local.sh \
+  docs/manual-verification.md \
   README.md; do
   expect_file "$file"
 done
@@ -68,16 +69,20 @@ expect_executable Tests/BuildReleaseTests.sh
 expect_exact_line .gitignore 'dist/'
 
 if [[ -f "$ROOT/Resources/Info.plist" ]]; then
+  bundle_short_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Resources/Info.plist" 2>/dev/null)"
+  bundle_build_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/Resources/Info.plist" 2>/dev/null)"
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$ROOT/Resources/Info.plist" 2>/dev/null)" == CodexQuickOKApp ]] || fail 'unexpected CFBundleExecutable'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$ROOT/Resources/Info.plist" 2>/dev/null)" == com.codexquickok.CodexQuickOK ]] || fail 'unexpected CFBundleIdentifier'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 'Codex 可' ]] || fail 'unexpected CFBundleName'
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 0.1.0 ]] || fail 'unexpected short version'
+  [[ "$bundle_short_version" == 0.1.0 ]] || fail 'unexpected short version'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$ROOT/Resources/Info.plist" 2>/dev/null)" == AppIcon ]] || fail 'CFBundleIconFile must be AppIcon'
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 4 ]] || fail 'bundle version must be 4'
+  [[ "$bundle_build_version" == 9 ]] || fail 'bundle version must be 9'
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$ROOT/Resources/Info.plist" 2>/dev/null)" == 14.0 ]] || fail 'unexpected minimum system version'
   if /usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$ROOT/Resources/Info.plist" >/dev/null 2>&1; then
     fail 'LSUIElement must be absent so Dock reopen remains reachable'
   fi
+  expect_exact_line docs/manual-verification.md "# Manual Verification — Build ${bundle_build_version}"
+  expect_exact_line docs/manual-verification.md "| Bundle version | ${bundle_short_version} (${bundle_build_version}) | Yes，与 \`Info.plist\` 一致性检查 |"
 fi
 
 expect_exact_line Sources/CodexQuickOKApp/AppMain.swift '        app.setActivationPolicy(.regular)'
@@ -152,7 +157,16 @@ zsh "$ROOT/Tests/InstallLocalTests.sh" || fail 'install-local behavioral checks 
 zsh "$ROOT/Tests/BuildReleaseTests.sh" || fail 'build-release behavioral checks failed'
 
 if [[ -f "$ROOT/README.md" ]]; then
-  expected_headings=('# Codex 可' '## 安装' '## 使用' '## 安全边界' '## 卸载')
+  expected_headings=(
+    '# 可'
+    '## macOS'
+    '### 安装'
+    '### 使用'
+    '### 安全边界'
+    '### 卸载'
+    '## Windows 11 x64 测试版'
+    '## 许可证'
+  )
   previous=0
   for heading in "${expected_headings[@]}"; do
     line="$(grep -nFx -- "$heading" "$ROOT/README.md" | head -n 1 | cut -d: -f1 || true)"

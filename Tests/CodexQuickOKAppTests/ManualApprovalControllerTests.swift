@@ -29,6 +29,51 @@ final class ManualApprovalControllerTests: XCTestCase {
         XCTAssertEqual(panel.lastMode, .running)
     }
 
+    func testAttentionUsesWaitingModeAndSuccessfulSendClearsIt() async {
+        let panel = RecordingPanel()
+        let sender = StubSender()
+        let controller = ManualApprovalController(panel: panel, sender: sender)
+        controller.start()
+
+        controller.setAttentionRequired(true)
+        XCTAssertEqual(panel.lastMode, .waiting)
+
+        panel.onActivate?()
+        await waitUntil { panel.successCount == 1 }
+
+        XCTAssertEqual(panel.lastMode, .running)
+        XCTAssertEqual(sender.callCount, 1)
+    }
+
+    func testAttentionDoesNotReshowTemporarilyHiddenPanel() {
+        let panel = RecordingPanel()
+        let controller = ManualApprovalController(panel: panel, sender: StubSender())
+        controller.start()
+        panel.hide()
+        panel.onTemporaryHide?()
+
+        controller.setAttentionRequired(true)
+
+        XCTAssertEqual(panel.lastMode, .hidden)
+        controller.show()
+        XCTAssertEqual(panel.lastMode, .waiting)
+    }
+
+    func testTaskTerminalReminderWaitsWhileHiddenAndForwardsOnReopen() {
+        let panel = RecordingPanel()
+        let controller = ManualApprovalController(panel: panel, sender: StubSender())
+        controller.start()
+
+        controller.showTaskTerminal(.completed)
+        panel.hide()
+        panel.onTemporaryHide?()
+        controller.showTaskTerminal(.interrupted)
+
+        XCTAssertEqual(panel.terminalOutcomes, [.completed])
+        controller.show()
+        XCTAssertEqual(panel.terminalOutcomes, [.completed, .interrupted])
+    }
+
     func testSecondClickIsIgnoredWhileSendRuns() async {
         let panel = RecordingPanel()
         let sender = StubSender(suspended: true)
@@ -45,7 +90,7 @@ final class ManualApprovalControllerTests: XCTestCase {
 
     func testFailureUsesLocalizedMessageAndDoesNotRetry() async {
         let panel = RecordingPanel()
-        let sender = StubSender(error: SendSafetyError.existingDraft)
+        let sender = StubSender(error: FocusedChatSendError.existingDraft)
         let controller = ManualApprovalController(panel: panel, sender: sender)
         controller.start()
 
@@ -55,6 +100,33 @@ final class ManualApprovalControllerTests: XCTestCase {
         XCTAssertEqual(sender.callCount, 1)
         XCTAssertEqual(panel.failures, ["检测到未发送草稿"])
         XCTAssertEqual(panel.sendingValues, [true, false])
+    }
+
+    func testUnknownFailureMentionsCurrentChatInsteadOfCodex() async {
+        struct UnknownError: Error {}
+        let panel = RecordingPanel()
+        let controller = ManualApprovalController(
+            panel: panel,
+            sender: StubSender(error: UnknownError())
+        )
+
+        controller.start()
+        panel.onActivate?()
+        await waitUntil { !panel.failures.isEmpty }
+
+        XCTAssertEqual(panel.failures, ["发送失败，请检查当前聊天框"])
+    }
+
+    func testDiagnosticCodeDoesNotContainErrorPayload() {
+        struct PayloadError: Error {
+            let message: String
+        }
+        let code = ManualApprovalController.diagnosticCode(
+            for: PayloadError(message: "private draft text")
+        )
+
+        XCTAssertTrue(code.contains("PayloadError"))
+        XCTAssertFalse(code.contains("private draft text"))
     }
 
     func testStopCancelsSendAndHidesPanel() async {
@@ -113,6 +185,7 @@ final class RecordingPanel: CompanionPanel {
     private(set) var failures: [String] = []
     private(set) var successCount = 0
     private(set) var quotas: [WeeklyQuota?] = []
+    private(set) var terminalOutcomes: [CodexTerminalOutcome] = []
 
     func show(mode: CompanionMode) {
         lastMode = mode
@@ -128,6 +201,9 @@ final class RecordingPanel: CompanionPanel {
     func setSending(_ sending: Bool) { sendingValues.append(sending) }
     func showSuccess() { successCount += 1 }
     func showFailure(_ message: String) { failures.append(message) }
+    func showTaskTerminal(_ outcome: CodexTerminalOutcome) {
+        terminalOutcomes.append(outcome)
+    }
 }
 
 @MainActor

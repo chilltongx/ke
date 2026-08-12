@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.22000.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Ke.Windows.Core/Ke.Windows.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../fixtures/codex-chat-empty.json"
+                      Link="Profiles/codex-chat-empty.json" />
+    <EmbeddedResource Include="../../fixtures/vscode-chat-empty.json"
+                      Link="Profiles/vscode-chat-empty.json" />
+  </ItemGroup>
+</Project>

@@ -1,13 +1,26 @@
 import AppKit
 @preconcurrency import ApplicationServices
 import CodexQuickOKCore
+import CoreGraphics
 import Darwin
+import OSLog
 import ServiceManagement
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    struct WindowActivationCandidate {
+        let processIdentifier: pid_t
+        let layer: Int
+        let isRegularApplication: Bool
+    }
+
     static let codexBundleIdentifier = "com.openai.codex"
     static let quotaRefreshInterval: TimeInterval = 300
+    static let attentionRefreshInterval: TimeInterval = 3
+    private static let activationLogger = Logger(
+        subsystem: "com.codexquickok.CodexQuickOK",
+        category: "activation"
+    )
 
     private let appServer: any CodexAppServerServing
     private let codexBinaryProvider: () throws -> URL
@@ -15,9 +28,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let loginItemManager: any LegacyLoginItemManaging
     private let loginMigrationState: any LegacyLoginItemMigrationStateStoring
     private let reconnectSleep: @MainActor (TimeInterval) async throws -> Void
+    private let scheduleActivationRestoration: (
+        @escaping @MainActor () -> Void
+    ) -> Void
+    private let focusRestoreTargetProvider: () -> pid_t?
+    private let restoreApplicationActivation: @MainActor (pid_t) -> Void
+    private let terminalMonitoringStartedAt: Int
+    private var activationRestoreTargetProcessIdentifier: pid_t?
     private var panel: (any CompanionPanel)?
     private var controller: ManualApprovalController?
     private var quotaTimer: Timer?
+    private var attentionTimer: Timer?
+    private var attentionTask: Task<Void, Never>?
     private(set) var isAppServerStarted = false
     private var reconnectAttempt = 0
     private var reconnectTask: Task<Void, Never>?
@@ -27,14 +49,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var shutdownFinished = false
     private var connectionEpoch: UInt64 = 0
     private var quotaRequestGeneration: UInt64 = 0
+    private var hasPrimedTerminalTurns = false
+    private var seenTerminalTurnIDs: Set<TerminalTurnID> = []
+
+    private struct TerminalTurnID: Hashable {
+        let threadID: String
+        let turnID: String
+    }
 
     private(set) var isShuttingDown = false
 
     override convenience init() {
+        let focusRestoreTargetProvider = {
+            Self.currentFocusRestoreTargetProcessIdentifier()
+        }
+        let restoreTarget = focusRestoreTargetProvider()
+        Self.activationLogger.notice(
+            "Captured launch focus target: \(restoreTarget ?? -1, privacy: .public)"
+        )
         self.init(
             appServer: CodexAppServerClient(),
             codexBinaryProvider: Self.installedCodexBinaryURL,
-            terminationReply: { NSApplication.shared.reply(toApplicationShouldTerminate: $0) }
+            terminationReply: {
+                NSApplication.shared.reply(toApplicationShouldTerminate: $0)
+            },
+            initialActivationRestoreTargetProcessIdentifier:
+                restoreTarget,
+            focusRestoreTargetProvider: focusRestoreTargetProvider
         )
     }
 
@@ -47,6 +88,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             UserDefaultsLoginItemMigrationState(),
         reconnectSleep: @escaping @MainActor (TimeInterval) async throws -> Void = {
             try await Task.sleep(for: .seconds($0))
+        },
+        scheduleActivationRestoration: @escaping (
+            @escaping @MainActor () -> Void
+        ) -> Void = { operation in
+            Task { @MainActor in
+                await Task.yield()
+                operation()
+            }
+        },
+        initialActivationRestoreTargetProcessIdentifier: pid_t? = nil,
+        focusRestoreTargetProvider: @escaping () -> pid_t? = { nil },
+        terminalMonitoringStartedAt: Int = Int(Date().timeIntervalSince1970),
+        restoreApplicationActivation: @escaping @MainActor (pid_t) -> Void = {
+            let restored = NSRunningApplication(processIdentifier: $0)?.activate(
+                options: [.activateAllWindows]
+            ) ?? false
+            AppDelegate.activationLogger.notice(
+                "Restored launch focus target \($0, privacy: .public): \(restored, privacy: .public)"
+            )
         }
     ) {
         self.appServer = appServer
@@ -55,7 +115,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.loginItemManager = loginItemManager
         self.loginMigrationState = loginMigrationState
         self.reconnectSleep = reconnectSleep
+        self.scheduleActivationRestoration = scheduleActivationRestoration
+        self.focusRestoreTargetProvider = focusRestoreTargetProvider
+        self.terminalMonitoringStartedAt = terminalMonitoringStartedAt
+        self.restoreApplicationActivation = restoreApplicationActivation
+        self.activationRestoreTargetProcessIdentifier =
+            initialActivationRestoreTargetProcessIdentifier
         super.init()
+    }
+
+    static func launchFocusTargetProcessIdentifier(
+        currentProcessIdentifier: pid_t,
+        frontmostProcessIdentifier: pid_t?,
+        windowCandidates: [WindowActivationCandidate]
+    ) -> pid_t? {
+        if let frontmostProcessIdentifier,
+           frontmostProcessIdentifier != currentProcessIdentifier {
+            return frontmostProcessIdentifier
+        }
+
+        return windowCandidates.first {
+            $0.processIdentifier != currentProcessIdentifier
+                && $0.layer == 0
+                && $0.isRegularApplication
+        }?.processIdentifier
+    }
+
+    private static func currentFocusRestoreTargetProcessIdentifier() -> pid_t? {
+        let frontmostApplication = NSWorkspace.shared.frontmostApplication
+        return launchFocusTargetProcessIdentifier(
+            currentProcessIdentifier: getpid(),
+            frontmostProcessIdentifier: frontmostApplication?.activationPolicy == .regular
+                ? frontmostApplication?.processIdentifier
+                : nil,
+            windowCandidates: currentWindowActivationCandidates()
+        )
+    }
+
+    private static func currentWindowActivationCandidates()
+        -> [WindowActivationCandidate] {
+        let options: CGWindowListOption = [
+            .optionOnScreenOnly,
+            .excludeDesktopElements,
+        ]
+        let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
+            as? [[String: Any]] ?? []
+
+        return windows.compactMap { window in
+            guard
+                let processNumber = window[kCGWindowOwnerPID as String]
+                    as? NSNumber,
+                let layerNumber = window[kCGWindowLayer as String] as? NSNumber
+            else { return nil }
+
+            let processIdentifier = processNumber.int32Value
+            let isRegularApplication = NSRunningApplication(
+                processIdentifier: processIdentifier
+            )?.activationPolicy == .regular
+            return WindowActivationCandidate(
+                processIdentifier: processIdentifier,
+                layer: layerNumber.intValue,
+                isRegularApplication: isRegularApplication
+            )
+        }
     }
 
     func configureManualRuntime(
@@ -67,6 +189,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.controller = controller
         panel.onRefreshQuota = { [weak self] in self?.refreshQuota() }
         controller.start()
+    }
+
+    func applicationWillBecomeActive(_ notification: Notification) {
+        guard let processIdentifier = focusRestoreTargetProvider(),
+              processIdentifier != getpid() else { return }
+        activationRestoreTargetProcessIdentifier = processIdentifier
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard let processIdentifier = activationRestoreTargetProcessIdentifier else {
+            Self.activationLogger.notice("Became active without a focus target")
+            return
+        }
+        Self.activationLogger.notice(
+            "Became active; scheduling focus target \(processIdentifier, privacy: .public)"
+        )
+        activationRestoreTargetProcessIdentifier = nil
+        scheduleActivationRestoration { [restoreApplicationActivation] in
+            restoreApplicationActivation(processIdentifier)
+        }
     }
 
     func applicationShouldHandleReopen(
@@ -128,8 +270,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         removeLegacyLoginItemIfNeeded()
 
         let panel = FloatingPanelController()
-        let automation = CurrentCodexAutomation(accessibility: AccessibilityClient())
-        let sender = CurrentWindowApprovalSender(automation: automation)
+        let accessibility = AccessibilityClient()
+        let sender = FocusedChatApprovalSender(
+            input: accessibility,
+            classifier: ChatTargetClassifier()
+        )
         configureManualRuntime(panel: panel, sender: sender)
 
         quotaTimer = Timer.scheduledTimer(
@@ -138,6 +283,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshQuota()
+            }
+        }
+        attentionTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.attentionRefreshInterval,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshTaskAttention()
             }
         }
         beginAppServerStart()
@@ -151,6 +304,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         isShuttingDown = true
         quotaTimer?.invalidate()
+        attentionTimer?.invalidate()
+        attentionTask?.cancel()
+        attentionTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
         connectionEpoch &+= 1
@@ -175,6 +331,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         quotaTimer?.invalidate()
+        attentionTimer?.invalidate()
+        attentionTask?.cancel()
+        attentionTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
         connectionEpoch &+= 1
@@ -229,6 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             reconnectAttempt = 0
             appServerStartTask = nil
             refreshQuota(connectionEpoch: epoch)
+            refreshTaskAttention(connectionEpoch: epoch)
         } catch {
             guard isCurrentConnection(epoch) else { return }
             appServerStartTask = nil
@@ -242,6 +402,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         refreshQuota(connectionEpoch: connectionEpoch)
+    }
+
+    func refreshTaskAttention() {
+        guard !isShuttingDown, isAppServerStarted else { return }
+        refreshTaskAttention(connectionEpoch: connectionEpoch)
+    }
+
+    func applyRecentTaskSnapshot(_ snapshot: CodexRecentTaskSnapshot) {
+        controller?.setAttentionRequired(snapshot.attention != nil)
+        publishNewTerminalTurns(from: snapshot)
+    }
+
+    private func refreshTaskAttention(connectionEpoch epoch: UInt64) {
+        guard isCurrentConnection(epoch), isAppServerStarted, attentionTask == nil else {
+            return
+        }
+        attentionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { attentionTask = nil }
+            do {
+                let snapshot = try await appServer.readRecentTaskSnapshot()
+                guard isCurrentConnection(epoch), !Task.isCancelled else { return }
+                applyRecentTaskSnapshot(snapshot)
+            } catch {
+                // Attention is best-effort. Quota polling owns connection recovery,
+                // so an older Codex without thread/read support does not restart-loop.
+            }
+        }
+    }
+
+    private func publishNewTerminalTurns(from snapshot: CodexRecentTaskSnapshot) {
+        let currentIDs = snapshot.terminalTurns.map {
+            TerminalTurnID(threadID: $0.threadID, turnID: $0.turnID)
+        }
+        guard hasPrimedTerminalTurns else {
+            hasPrimedTerminalTurns = true
+            rememberTerminalTurnIDs(currentIDs)
+            for turn in snapshot.terminalTurns
+                where turn.completedAt >= terminalMonitoringStartedAt {
+                controller?.showTaskTerminal(turn.outcome)
+            }
+            return
+        }
+
+        for (turn, identifier) in zip(snapshot.terminalTurns, currentIDs) {
+            guard seenTerminalTurnIDs.insert(identifier).inserted else { continue }
+            guard turn.completedAt >= terminalMonitoringStartedAt else { continue }
+            controller?.showTaskTerminal(turn.outcome)
+        }
+    }
+
+    private func rememberTerminalTurnIDs(_ identifiers: [TerminalTurnID]) {
+        seenTerminalTurnIDs.formUnion(identifiers)
     }
 
     private func refreshQuota(connectionEpoch epoch: UInt64) {
@@ -271,6 +484,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quotaRequestGeneration &+= 1
         let failedEpoch = connectionEpoch
         isAppServerStarted = false
+        attentionTask?.cancel()
+        attentionTask = nil
+        controller?.setAttentionRequired(false)
         panel?.setQuota(nil)
         await appServer.stop()
         guard isCurrentConnection(failedEpoch) else { return }

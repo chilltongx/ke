@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "「可」Windows 11 MVP",
+    "subtitle": ".NET 10 · WPF · UI Automation · no-focus-steal send path",
+    "output": "2026-08-04-ke-windows-architecture.html",
+    "viewBox": [1600, 690]
+  },
+  "components": [
+    { "id": "button", "type": "frontend", "label": "Floating 可", "sublabel": "WPF · topmost", "pos": [50, 270], "size": [140, 68], "tag": "no activate" },
+    { "id": "coordinator", "type": "backend", "label": "Send Coordinator", "sublabel": "single in-flight", "pos": [235, 270], "size": [150, 68] },
+    { "id": "snapshot", "type": "security", "label": "Focus Snapshot", "sublabel": "HWND + PID + UIA", "pos": [430, 270], "size": [150, 68] },
+    { "id": "adapter", "type": "security", "label": "App Adapter", "sublabel": "Codex / VS Code", "pos": [625, 270], "size": [150, 68] },
+    { "id": "guard", "type": "security", "label": "Draft Guard", "sublabel": "chat + empty only", "pos": [820, 270], "size": [150, 68] },
+    { "id": "revalidate", "type": "security", "label": "Revalidate", "sublabel": "same target + empty", "pos": [1015, 270], "size": [150, 68] },
+    { "id": "writer", "type": "backend", "label": "Input Writer", "sublabel": "Unicode 可 + Enter", "pos": [1210, 270], "size": [150, 68] },
+    { "id": "target", "type": "external", "label": "Target Chat", "sublabel": "focused app process", "pos": [1405, 270], "size": [110, 68] },
+    { "id": "feedback", "type": "frontend", "label": "Visual Feedback", "sublabel": "mint / red", "pos": [235, 455], "size": [150, 68] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "WPF shell · UI thread", "wraps": ["button", "coordinator", "feedback"] },
+    { "kind": "security-group", "label": "Dedicated automation worker · fail closed", "wraps": ["snapshot", "adapter", "guard", "revalidate", "writer"] },
+    { "kind": "region", "label": "Foreground application", "wraps": ["target"] }
+  ],
+  "connections": [
+    { "from": "button", "to": "coordinator", "label": "click", "variant": "emphasis" },
+    { "from": "coordinator", "to": "snapshot" },
+    { "from": "snapshot", "to": "adapter", "label": "UIA" },
+    { "from": "adapter", "to": "guard" },
+    { "from": "guard", "to": "revalidate", "label": "empty", "variant": "security" },
+    { "from": "revalidate", "to": "writer", "label": "stable", "variant": "security" },
+    { "from": "writer", "to": "target", "label": "send", "variant": "emphasis" },
+    { "from": "coordinator", "to": "feedback", "label": "result", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelAt": [310, 386] }
+  ],
+  "cards": [
+    { "dot": "rose", "title": "Safety invariants", "items": ["Only Codex and VS Code adapters", "Reject drafts, editors, terminals and password fields", "Re-check focus and content immediately before Enter"] },
+    { "dot": "cyan", "title": "Windows shell", "items": ["Borderless 64px button never takes keyboard focus", "Drag position persists per monitor", "Success, failure and accessibility feedback stay local"] },
+    { "dot": "emerald", "title": "Portable release", "items": ["Windows 11 x64", ".NET 10 self-contained single EXE", "No admin rights, installer or startup registration"] }
+  ]
+}
